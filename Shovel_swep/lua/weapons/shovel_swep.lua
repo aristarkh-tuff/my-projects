@@ -1,7 +1,7 @@
 AddCSLuaFile()
 
 SWEP.PrintName			= "Charged Shovel"
-SWEP.Author				= "AI Collaboration"
+SWEP.Author				= "Aristarkh"
 SWEP.Instructions		= "Left Click: Normal swing (10 Dmg, 30% Ragdoll)\nHold Right Click: Charge heavy swing (Up to 45 Dmg, up to 90% Ragdoll)"
 SWEP.Category			= "Custom Weapons"
 SWEP.Spawnable			= true
