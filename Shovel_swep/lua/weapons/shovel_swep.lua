@@ -131,19 +131,6 @@ local function KnockdownTarget(target, duration, damage, attacker)
 
     -- NPC / ZOMBIE / ANTLION RAGDOLL LOGIC
     elseif target:IsNPC() then
-        
-        -- ADVANCED ZOMBINE GRENADE DETECTION & DISARM:
-        local hasGrenade = false
-        if target:GetClass() == "npc_zombine" then
-            local seqName = target:GetSequenceName(target:GetSequence())
-            -- Check if they are performing any grenade actions or have the bodygroup active
-            if string.find(string.lower(seqName), "grenade") or target:GetBodygroup(1) == 1 then
-                hasGrenade = true
-                -- Visually remove it from the invisible NPC right away to prevent engine auto-drops
-                target:SetBodygroup(1, 0)
-            end
-        end
-
         target.IsShovelRagdolled = true
 
         local ragdoll = ents.Create("prop_ragdoll")
@@ -155,8 +142,7 @@ local function KnockdownTarget(target, duration, damage, attacker)
 
         ragdoll:SetSkin(target:GetSkin())
         
-        -- FLAWLESS MODEL & HEADCRAB RETENTION:
-        -- Copy bodygroups smoothly. For Zombines, this safely preserves their head structures.
+        -- Exact bodygroup inheritance
         for i = 0, target:GetNumBodyGroups() - 1 do
             ragdoll:SetBodygroup(i, target:GetBodygroup(i))
         end
@@ -219,17 +205,6 @@ local function KnockdownTarget(target, duration, damage, attacker)
                 target:SetMoveType(MOVETYPE_STEP) 
                 target.IsShovelRagdolled = false
 
-                -- SPAWN USEABLE AMMO ITEM AT WAKEUP LOCATION:
-                if hasGrenade then
-                    local item = ents.Create("item_ammo_grenade")
-                    if IsValid(item) then
-                        item:SetPos(finalPos + Vector(0, 0, 10))
-                        item:Spawn()
-                        item:Activate()
-                    end
-                    hasGrenade = false -- Reset state toggle
-                end
-
                 target:ClearSchedule()
                 target:ClearGoal()
                 target:SetCondition(COND_LIGHT_DAMAGE)
@@ -263,20 +238,6 @@ hook.Add("NPCThink", "ShovelPreventNPCAttacks", function(npc)
         npc:ClearGoal()
         if npc.SetEnemy then npc:SetEnemy(nil) end
         npc:SetNextAttack(CurTime() + 1) 
-        
-        -- Hard lock Zombines out of spawning physical engine explosion hazards while hidden
-        if npc:GetClass() == "npc_zombine" then
-            npc:SetBodygroup(1, 0)
-        end
-    end
-end)
-
--- Total suppression engine hook to block any unwanted C++ engine generated grenade calls
-hook.Add("AcceptInput", "ShovelSuppressZombineGhostGrenades", function(ent, input, activator, caller, value)
-    if IsValid(ent) and ent:IsNPC() and ent:GetClass() == "npc_zombine" and ent.IsShovelRagdolled then
-        if input == "PrepareForGrenade" or input == "DrawGrenade" then
-            return true 
-        end
     end
 end)
 
@@ -419,7 +380,7 @@ if CLIENT then
         end
     end
 
-    -- WORLD MODEL HAND-FIX: Keeps shovel firmly attached to third-person models
+    -- WORLD MODEL HAND-FIX: Perfectly places the shovel in the right hand grip
     local ShovelWorldModel = nil
     function SWEP:DrawWorldModel()
         local owner = self:GetOwner()
@@ -468,6 +429,7 @@ if CLIENT then
             surface.SetDrawColor(255, 255 - (progress * 155), 0, 255)
             surface.DrawRect(x + 2, y + 2, (w - 4) * progress, h - 4)
             
+            -- UI Text Alignments
             draw.SimpleText(curPercent .. "%", "DermaDefaultBold", x - 12, y + (h / 2), Color(255, 255, 255), TEXT_ALIGN_RIGHT, TEXT_ALIGN_CENTER)
             draw.SimpleText("KNOCKDOWN CHANCE: " .. curRagdoll .. "%", "DermaDefaultBold", ScrW() / 2, y - 14, Color(255, 255, 255), TEXT_ALIGN_CENTER)
             draw.SimpleText(curDamage .. " DMG", "DermaDefaultBold", x + w + 12, y + (h / 2), Color(255, 255, 255), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
