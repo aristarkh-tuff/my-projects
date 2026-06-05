@@ -1,7 +1,7 @@
 AddCSLuaFile()
 
 SWEP.PrintName			= "Charged Shovel"
-SWEP.Author				= "Aristarkh"
+SWEP.Author				= "aristarkh"
 SWEP.Instructions		= "Left Click: Normal swing (10 Dmg, 30% Ragdoll)\nHold Right Click: Charge heavy swing (Up to 45 Dmg, up to 90% Ragdoll)"
 SWEP.Category			= "Custom Weapons"
 SWEP.Spawnable			= true
@@ -131,6 +131,13 @@ local function KnockdownTarget(target, duration, damage, attacker)
 
     -- NPC / ZOMBIE / ANTLION RAGDOLL LOGIC
     elseif target:IsNPC() then
+        -- CRITICAL GHOST GRENADE PRE-EMPTIVE FIX:
+        -- Force the Zombine to pull down its grenade bodygroup BEFORE we make it invisible/ragdoll.
+        -- This tricks the engine into thinking it never had a grenade active in its hand.
+        if target:GetClass() == "npc_zombine" then
+            target:SetBodygroup(1, 0) 
+        end
+
         target.IsShovelRagdolled = true
 
         local ragdoll = ents.Create("prop_ragdoll")
@@ -141,13 +148,11 @@ local function KnockdownTarget(target, duration, damage, attacker)
         ragdoll:Activate()
 
         ragdoll:SetSkin(target:GetSkin())
-        for i = 0, target:GetNumBodyGroups() - 1 do
-            local currentGroup = target:GetBodygroup(i)
-            ragdoll:SetBodygroup(i, currentGroup)
-        end
         
-        if target:GetClass() == "npc_zombie" and ragdoll:GetBodygroup(1) == 0 then
-            ragdoll:SetBodygroup(1, 1) 
+        -- FIXED HEADCRAB VISIBILITY LOOPS:
+        -- Explicitly match exactly what the living NPC currently has equipped.
+        for i = 0, target:GetNumBodyGroups() - 1 do
+            ragdoll:SetBodygroup(i, target:GetBodygroup(i))
         end
 
         for i = 0, ragdoll:GetPhysicsObjectCount() - 1 do
