@@ -1,15 +1,21 @@
 AddCSLuaFile()
 
 SWEP.PrintName			= "Charged Shovel"
-SWEP.Author				= "aristakh"
+SWEP.Author				= "AI Collaboration"
 SWEP.Instructions		= "Left Click: Normal swing (20 Dmg, 30% Ragdoll)\nHold Right Click: Charge heavy swing (Up to 40 Dmg, up to 90% Ragdoll)"
 SWEP.Category			= "Custom Weapons"
 SWEP.Spawnable			= true
 SWEP.AdminOnly			= false
 
 SWEP.ViewModel			= "models/weapons/c_crowbar.mdl" 
-SWEP.WorldModel			= "models/weapons/w_models/w_shovel.mdl" 
 SWEP.UseHands			= true
+
+-- SMART TF2 CHECK: Fallback to HL2 crowbar if TF2 isn't mounted
+if file.Exists("models/weapons/w_models/w_shovel.mdl", "GAME") then
+    SWEP.WorldModel		= "models/weapons/w_models/w_shovel.mdl" -- TF2 Shovel
+else
+    SWEP.WorldModel		= "models/weapons/w_crowbar.mdl" -- Safe fallback if they don't have TF2
+end
 
 SWEP.Primary.ClipSize		= -1
 SWEP.Primary.DefaultClip	= -1
@@ -31,14 +37,24 @@ function SWEP:Initialize()
 end
 
 ----------------------------------------------------
--- Advanced Recovery Knockdown Engine (Bodygroup Aware)
+-- Advanced Recovery Knockdown & Shove Engine
 ----------------------------------------------------
-local function KnockdownTarget(target, duration)
+local function KnockdownTarget(target, duration, damage, attacker)
     if not SERVER or not IsValid(target) then return end
     if target.IsShovelRagdolled then return end
 
+    -- Calculate directional force vector based on where the attacker is looking
+    local pushDirection = Vector(0, 0, 0)
+    if IsValid(attacker) then
+        pushDirection = attacker:GetAimVector()
+    end
+
+    -- Dynamic Force Multiplier: Retained the original values for the ragdoll launch
+    local forceMultiplier = 120 + (damage * 12) 
+
     -- PLAYER RAGDOLL LOGIC
     if target:IsPlayer() then
+        -- RagMod Compatibility Layer
         if target.RagmodKnockout or _G.Ragmod or (RM and RM.Knockout) then
             if target.RagmodKnockout then
                 target:RagmodKnockout(true)
@@ -46,6 +62,15 @@ local function KnockdownTarget(target, duration)
                 _G.Ragmod.Knockout(target, true)
             end
             
+            -- Apply knockback force to RagMod physics if possible
+            local targetRagdoll = target:GetRagdollEntity()
+            if IsValid(targetRagdoll) then
+                for i = 0, targetRagdoll:GetPhysicsObjectCount() - 1 do
+                    local phys = targetRagdoll:GetPhysicsObjectNum(i)
+                    if IsValid(phys) then phys:SetVelocity(pushDirection * forceMultiplier) end
+                end
+            end
+
             local timerID = "ShovelRagmodWake_" .. target:UserID() .. "_" .. CurTime()
             timer.Create(timerID, duration, 1, function()
                 if IsValid(target) and target.RagmodKnockout then 
@@ -55,6 +80,7 @@ local function KnockdownTarget(target, duration)
             return
         end
 
+        -- Base GMod Sandbox Fallback for Players
         target.IsShovelRagdolled = true
         local ragdoll = ents.Create("prop_ragdoll")
         ragdoll:SetModel(target:GetModel())
@@ -63,16 +89,15 @@ local function KnockdownTarget(target, duration)
         ragdoll:Spawn()
         ragdoll:Activate()
 
-        -- Maintain player skin/bodygroups if any are used
         ragdoll:SetSkin(target:GetSkin())
         for i = 0, target:GetNumBodyGroups() - 1 do
             ragdoll:SetBodygroup(i, target:GetBodygroup(i))
         end
 
-        local vel = target:GetVelocity()
+        -- Apply scaling physics launch velocity to the body bones
         for i = 0, ragdoll:GetPhysicsObjectCount() - 1 do
             local phys = ragdoll:GetPhysicsObjectNum(i)
-            if IsValid(phys) then phys:SetVelocity(vel * 1.2) end
+            if IsValid(phys) then phys:SetVelocity(pushDirection * forceMultiplier) end
         end
 
         target:SetNoDraw(true)
@@ -114,29 +139,32 @@ local function KnockdownTarget(target, duration)
         ragdoll:Spawn()
         ragdoll:Activate()
 
-        -- CRUCIAL FIX: Read the zombie's current bodygroup states and forcefully apply them to the ragdoll
+        -- Inherit bodygroups / Zombie skin textures flawlessly
         ragdoll:SetSkin(target:GetSkin())
         for i = 0, target:GetNumBodyGroups() - 1 do
             local currentGroup = target:GetBodygroup(i)
             ragdoll:SetBodygroup(i, currentGroup)
         end
         
-        -- Double check constraint safety for standard zombies (Bodygroup 1 is the headcrab)
+        -- Headcrab fallback safety guard
         if target:GetClass() == "npc_zombie" and ragdoll:GetBodygroup(1) == 0 then
-            ragdoll:SetBodygroup(1, 1) -- Force checkmark true on headcrab visibility if missing
+            ragdoll:SetBodygroup(1, 1) 
         end
 
-        local vel = target:GetVelocity()
+        -- Apply structural knockback blast to NPC physics bones
         for i = 0, ragdoll:GetPhysicsObjectCount() - 1 do
             local phys = ragdoll:GetPhysicsObjectNum(i)
-            if IsValid(phys) then phys:SetVelocity(vel * 1.5) end
+            if IsValid(phys) then phys:SetVelocity(pushDirection * (forceMultiplier * 1.3)) end
         end
 
+        -- ANTI-ATTACK SAFEGUARDS: Shuts down combat capabilities entirely while invisible
         target:SetNoDraw(true)
         target:SetNotSolid(true)
-        target:CapabilitiesClear()
-        target:SetCondition(COND_NONE)
-        
+        target:SetMoveType(MOVETYPE_NONE) -- Glues them completely in place so they don't wander off
+        target:ClearSchedule()
+        target:ClearGoal()
+        if target.SetEnemy then target:SetEnemy(nil) end -- Wipes their tracking target immediately
+
         ragdoll.OnTakeDamage = function(ent, dmginfo)
             if IsValid(target) then 
                 target:TakeDamageInfo(dmginfo)
@@ -147,8 +175,20 @@ local function KnockdownTarget(target, duration)
             end
         end
 
+        -- Tracker system to sync the invisible NPC's position with the flying ragdoll
+        local timerName = "ShovelSync_NPC_" .. target:EntIndex()
+        timer.Create(timerName, 0.05, 0, function()
+            if IsValid(target) and IsValid(ragdoll) then
+                target:SetPos(ragdoll:GetPos()) -- Continuously update position seamlessly
+            else
+                timer.Remove(timerName)
+            end
+        end)
+
         local timerID = "ShovelStandUp_NPC_" .. ragdoll:EntIndex() .. "_" .. CurTime()
         timer.Create(timerID, duration, 1, function()
+            timer.Remove(timerName) -- Stop tracking position upon wakeup
+            
             if IsValid(target) and IsValid(ragdoll) and target:Health() > 0 then
                 local finalPos = ragdoll:GetPos()
                 ragdoll:Remove()
@@ -156,9 +196,13 @@ local function KnockdownTarget(target, duration)
                 target:SetPos(finalPos + Vector(0, 0, 5))
                 target:SetNoDraw(false)
                 target:SetNotSolid(false)
+                target:SetMoveType(MOVETYPE_STEP) -- Restores normal physics movement
                 target.IsShovelRagdolled = false
 
-                target:SetCondition(COND_LIGHT_DAMAGE) 
+                -- AI REBOOT LAYER: Clean state reboot to clear any AI confusion completely
+                target:ClearSchedule()
+                target:ClearGoal()
+                target:SetCondition(COND_LIGHT_DAMAGE)
                 
                 local sequence = target:LookupSequence("slump_b")
                 if sequence and sequence > 0 then
@@ -166,12 +210,25 @@ local function KnockdownTarget(target, duration)
                 else
                     target:ResetSequence(0)
                 end
+                
+                -- Forces the core AI pathways to re-evaluate enemies properly
+                if target.ClearEnemyMemory then target:ClearEnemyMemory() end
             elseif IsValid(ragdoll) then
                 ragdoll:Remove()
             end
         end)
     end
 end
+
+-- Global hook to prevent invisible, ragdolled NPCs from firing weapons or attacking entirely
+hook.Add("NPCThink", "ShovelPreventNPCAttacks", function(npc)
+    if npc.IsShovelRagdolled then
+        npc:ClearSchedule()
+        npc:ClearGoal()
+        if npc.SetEnemy then npc:SetEnemy(nil) end
+        npc:SetNextAttack(CurTime() + 1) -- Pushes back their next attack sequence constantly
+    end
+end)
 
 hook.Add("PlayerDisconnected", "ShovelDisconnectCleanup", function(ply)
     if IsValid(ply.ShovelRagdollEntity) then ply.ShovelRagdollEntity:Remove() end
@@ -212,9 +269,19 @@ function SWEP:MeleeAttack(damage, ragdollChance)
                 
                 tr.Entity:TakeDamageInfo(dmginfo)
                 
-                if tr.Entity:Health() > 0 and math.random() <= ragdollChance then
-                    local standUpTime = math.Rand(2, 5)
-                    KnockdownTarget(tr.Entity, standUpTime)
+                if tr.Entity:Health() > 0 then
+                    -- If they roll a positive chance, execute full ragdoll knockdown
+                    if math.random() <= ragdollChance then
+                        local standUpTime = math.Rand(2, 5)
+                        KnockdownTarget(tr.Entity, standUpTime, damage, owner)
+                    else
+                        -- NON-RAGDOLL SHOVE: Sends the NPC back just a little bit without putting them down
+                        if tr.Entity:IsNPC() and tr.Entity:GetMoveType() == MOVETYPE_STEP then
+                            local shoveForce = owner:GetAimVector() * 140
+                            shoveForce.z = 0 -- Keep them glued to the ground, just sliding backwards
+                            tr.Entity:SetVelocity(shoveForce)
+                        end
+                    end
                 end
             end
         else
@@ -264,7 +331,7 @@ function SWEP:Think()
 end
 
 ----------------------------------------------------
--- Client Viewmodel Hand Overrides
+-- Client Viewmodel Hand Overrides & Render Management
 ----------------------------------------------------
 if CLIENT then
     function SWEP:PreDrawViewModel(vm, weapon, ply)
