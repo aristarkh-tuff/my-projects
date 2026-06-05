@@ -1,7 +1,7 @@
- AddCSLuaFile()
+AddCSLuaFile()
 
 SWEP.PrintName			= "Charged Shovel"
-SWEP.Author				= "Aristarkh"
+SWEP.Author				= "AI Collaboration"
 SWEP.Instructions		= "Left Click: Normal swing (10 Dmg, 30% Ragdoll)\nHold Right Click: Charge heavy swing (Up to 45 Dmg, up to 90% Ragdoll)"
 SWEP.Category			= "Custom Weapons"
 SWEP.Spawnable			= true
@@ -228,7 +228,7 @@ local function KnockdownTarget(target, duration, damage, attacker)
 end
 
 ----------------------------------------------------
--- SYSTEM INTEGRATION HOOKS (Zombine Fixes)
+-- SYSTEM INTEGRATION HOOKS
 ----------------------------------------------------
 hook.Add("NPCThink", "ShovelPreventNPCAttacks", function(npc)
     if npc.IsShovelRagdolled then
@@ -241,45 +241,6 @@ hook.Add("NPCThink", "ShovelPreventNPCAttacks", function(npc)
         npc:ClearGoal()
         if npc.SetEnemy then npc:SetEnemy(nil) end
         npc:SetNextAttack(CurTime() + 1) 
-    end
-end)
-
--- Checks if a Zombine is running with a live grenade when hit, stripping it out
-hook.Add("PostEntityTakeDamage", "ShovelZombineGrenadeDrop", function(target, dmginfo, took)
-    if not SERVER or not took or not IsValid(target) then return end
-    if target:IsNPC() and target:GetClass() == "npc_zombine" then
-        -- Native Engine Check: Bodygroup 1 means a visible grenade is active in their hand
-        if target:GetBodygroup(1) == 1 then
-            target:SetBodygroup(1, 0) -- Physically remove it from their hand mesh
-            
-            -- Lock out future grenade calls by overriding engine combat schedules
-            target.HasDroppedShovelGrenade = true
-            
-            -- Spawn an active physical explosion grenade at their feet
-            local handBone = target:LookupBone("ValveBiped.Anim_Attachment_RH")
-            local spawnPos = handBone and target:GetBonePosition(handBone) or (target:GetPos() + Vector(0,0,45))
-            
-            local fGrenade = ents.Create("npc_grenade_frag")
-            if IsValid(fGrenade) then
-                fGrenade:SetPos(spawnPos)
-                fGrenade:SetAngles(target:GetAngles())
-                fGrenade:SetOwner(target)
-                fGrenade:Spawn()
-                fGrenade:Activate()
-                -- Instantly prime it to simulate the dropped live fuse
-                fGrenade:Fire("SetTimer", "2") 
-            end
-        end
-    end
-end)
-
--- Block Zombines completely from initiating their grenade sprint state ever again once disarmed
-hook.Add("AcceptInput", "ShovelBlockZombineGrenades", function(ent, input, activator, caller, value)
-    if IsValid(ent) and ent:IsNPC() and ent:GetClass() == "npc_zombine" and ent.HasDroppedShovelGrenade then
-        -- Standard inputs sent via source code AI paths for pulling grenades
-        if input == "PrepareForGrenade" or input == "DrawGrenade" then
-            return true -- Suppress and block execution completely
-        end
     end
 end)
 
@@ -422,7 +383,7 @@ if CLIENT then
         end
     end
 
-    -- WORLD MODEL HAND-FIX: Hooks into third-person rendering to stick the weapon securely into the player's world hand
+    -- WORLD MODEL HAND-FIX: Keeps shovel firmly in player's actual hand mesh
     local ShovelWorldModel = nil
     function SWEP:DrawWorldModel()
         local owner = self:GetOwner()
@@ -436,12 +397,10 @@ if CLIENT then
             if bone then
                 local pos, ang = owner:GetBonePosition(bone)
                 if pos and ang then
-                    -- Rotational matrix modifications ensuring standard handle orientation alignment
                     ang:RotateAroundAxis(ang:Forward(), 180)
                     ang:RotateAroundAxis(ang:Up(), 90)
                     ang:RotateAroundAxis(ang:Right(), 0)
                     
-                    -- Positional offsets to place the handle grip directly inside the fingers
                     pos = pos + ang:Forward() * 3 + ang:Right() * 1 + ang:Up() * -3
                     
                     ShovelWorldModel:SetPos(pos)
