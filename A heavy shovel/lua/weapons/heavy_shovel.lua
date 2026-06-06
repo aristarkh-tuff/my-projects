@@ -4,8 +4,7 @@ SWEP.PrintName = "Heavy Shovel"
 SWEP.Author = "You"
 SWEP.Instructions = "Left Click: Swing | Right Click: Charge"
 SWEP.Category = "Custom Melee"
--- Make sure this texture exists or it will error
-SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/heavy_shovel") 
+SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/heavy_shovel")
 
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -15,9 +14,12 @@ SWEP.WorldModel = "models/props_junk/shovel01a.mdl"
 SWEP.UseHands = true
 SWEP.HoldType = "melee2"
 
--- NEW: Use this to adjust your viewmodel position/angle
+-- Offset for Viewmodel
+-- Vector(Forward, Right, Up)
 SWEP.ViewModelOffset = Vector(10, 5, -5)
-SWEP.ViewModelAngleOffset = Angle(0, 0, 0)
+-- Adjust these angles to flip the shovel (Pitch, Yaw, Roll)
+-- 180 on one of these axes should flip it right-side up
+SWEP.ViewModelAngleOffset = Angle(180, 0, 0) 
 
 -- World Model Offset
 SWEP.Offset = {
@@ -35,15 +37,16 @@ SWEP.Secondary.DefaultClip = -1
 SWEP.Secondary.Automatic = true
 SWEP.Secondary.Ammo = "none"
 
--- FIXED: This moves the model in your view
 function SWEP:GetViewModelPosition(pos, ang)
+    -- Apply positional offset
     pos = pos + (ang:Forward() * self.ViewModelOffset.x)
     pos = pos + (ang:Right() * self.ViewModelOffset.y)
     pos = pos + (ang:Up() * self.ViewModelOffset.z)
     
-    ang:RotateAroundAxis(ang:Forward(), self.ViewModelAngleOffset.r)
+    -- Apply rotational offset
     ang:RotateAroundAxis(ang:Right(), self.ViewModelAngleOffset.p)
     ang:RotateAroundAxis(ang:Up(), self.ViewModelAngleOffset.y)
+    ang:RotateAroundAxis(ang:Forward(), self.ViewModelAngleOffset.r)
     
     return pos, ang
 end
