@@ -124,9 +124,11 @@ end
 if SERVER then
     function SWEP:RagdollNPC(npc, damage)
         if not IsValid(npc) or npc.IsRagdolled then return end
+        
         npc.IsRagdolled = true
         npc:SetNoDraw(true)
         npc:SetSolid(SOLID_NONE)
+        npc:SetMoveType(MOVETYPE_NONE) -- This stops the NPC from trying to stand up
         
         local ragdoll = ents.Create("prop_ragdoll")
         ragdoll:SetModel(npc:GetModel())
@@ -135,6 +137,7 @@ if SERVER then
         ragdoll:SetSkin(npc:GetSkin())
         ragdoll:SetColor(npc:GetColor())
         ragdoll:SetMaterial(npc:GetMaterial())
+        ragdoll:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
         ragdoll:Spawn()
         
         for i = 0, npc:GetNumBodyGroups() - 1 do ragdoll:SetBodygroup(i, npc:GetBodygroup(i)) end
@@ -148,32 +151,57 @@ if SERVER then
         local timerID = "ShovelRagdoll_" .. ragdoll:EntIndex()
         local wakeUpTime = CurTime() + math.random(4, 7)
 
-        timer.Create(timerID, 0, 0, function()
-            -- FIX: If NPC dies, make it visible and stop our custom ragdoll behavior
-            if IsValid(npc) and npc:Health() <= 0 then
-                npc:SetNoDraw(false)
-                npc:SetSolid(SOLID_BBOX)
-                npc.IsRagdolled = false
-                if IsValid(ragdoll) then ragdoll:Remove() end
-                timer.Remove(timerID)
-                return
+        -- INTERCEPT DAMAGE: If lethal, clean up instantly so the NPC dies naturally
+        function ragdoll:OnTakeDamage(dmginfo)
+            if IsValid(npc) then
+                if npc:Health() - dmginfo:GetDamage() <= 0 then
+                    -- PRE-DEATH CLEANUP
+                    if IsValid(ragdoll) then ragdoll:Remove() end
+                    npc:SetNoDraw(false)
+                    npc:SetSolid(SOLID_BBOX)
+                    npc:SetMoveType(MOVETYPE_STEP)
+                    npc.IsRagdolled = false
+                    -- Now apply the lethal damage
+                    npc:TakeDamageInfo(dmginfo)
+                else
+                    -- Non-lethal, just pass damage to NPC
+                    npc:TakeDamageInfo(dmginfo)
+                end
             end
+        end
 
-            if not IsValid(ragdoll) then
+        timer.Create(timerID, 0, 0, function()
+            -- 1. Check if NPC died from something else (e.g., world damage)
+            if not IsValid(npc) or npc:Health() <= 0 then
+                if IsValid(ragdoll) then ragdoll:Remove() end
                 if IsValid(npc) then
                     npc:SetNoDraw(false)
                     npc:SetSolid(SOLID_BBOX)
+                    npc:SetMoveType(MOVETYPE_STEP)
                     npc.IsRagdolled = false
                 end
                 timer.Remove(timerID)
                 return
             end
 
-            -- Keep NPC synced to ragdoll
+            -- 2. If proxy is missing, restore NPC
+            if not IsValid(ragdoll) then
+                if IsValid(npc) then
+                    npc:SetNoDraw(false)
+                    npc:SetSolid(SOLID_BBOX)
+                    npc:SetMoveType(MOVETYPE_STEP)
+                    npc.IsRagdolled = false
+                end
+                timer.Remove(timerID)
+                return
+            end
+
+            -- 3. Sync positions
             local physBone = ragdoll:GetPhysicsObjectNum(0)
             if IsValid(physBone) then npc:SetPos(physBone:GetPos()) else npc:SetPos(ragdoll:GetPos()) end
             npc:SetAngles(ragdoll:GetAngles())
 
+            -- 4. Wake up logic
             if CurTime() >= wakeUpTime then
                 timer.Remove(timerID)
                 if IsValid(npc) and IsValid(ragdoll) then
@@ -181,6 +209,7 @@ if SERVER then
                     ragdoll:Remove()
                     npc:SetNoDraw(false)
                     npc:SetSolid(SOLID_BBOX)
+                    npc:SetMoveType(MOVETYPE_STEP)
                     npc.IsRagdolled = false
                 end
             end
