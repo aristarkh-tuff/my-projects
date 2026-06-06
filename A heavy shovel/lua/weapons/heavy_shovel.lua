@@ -11,14 +11,11 @@ SWEP.AdminOnly = false
 
 SWEP.ViewModel = "models/props_junk/shovel01a.mdl" 
 SWEP.WorldModel = "models/props_junk/shovel01a.mdl"
-SWEP.UseHands = true
+SWEP.UseHands = false -- Set to false to prevent C-Hand overlay
 SWEP.HoldType = "melee2"
 
 -- Offset for Viewmodel
--- Vector(Forward, Right, Up)
 SWEP.ViewModelOffset = Vector(10, 5, -5)
--- Adjust these angles to flip the shovel (Pitch, Yaw, Roll)
--- 180 on one of these axes should flip it right-side up
 SWEP.ViewModelAngleOffset = Angle(180, 0, 0) 
 
 -- World Model Offset
@@ -37,13 +34,16 @@ SWEP.Secondary.DefaultClip = -1
 SWEP.Secondary.Automatic = true
 SWEP.Secondary.Ammo = "none"
 
+-- Hides the default C-hands for this weapon
+function SWEP:ViewModelDrawn()
+    return false 
+end
+
 function SWEP:GetViewModelPosition(pos, ang)
-    -- Apply positional offset
     pos = pos + (ang:Forward() * self.ViewModelOffset.x)
     pos = pos + (ang:Right() * self.ViewModelOffset.y)
     pos = pos + (ang:Up() * self.ViewModelOffset.z)
     
-    -- Apply rotational offset
     ang:RotateAroundAxis(ang:Right(), self.ViewModelAngleOffset.p)
     ang:RotateAroundAxis(ang:Up(), self.ViewModelAngleOffset.y)
     ang:RotateAroundAxis(ang:Forward(), self.ViewModelAngleOffset.r)
