@@ -78,7 +78,6 @@ function SWEP:Think()
     end
 end
 
--- UPDATED: Now handles Props and NPCs with scaled knockback
 function SWEP:MeleeStrike(damage, ragdollChance)
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
@@ -101,13 +100,8 @@ function SWEP:MeleeStrike(damage, ragdollChance)
     
     if SERVER and tr.Hit and IsValid(tr.Entity) then
         local finalDamage = damage
-        
-        -- Cap damage for headcrabs
-        if tr.Entity:GetClass():find("headcrab") then
-            finalDamage = math.min(finalDamage, 8) 
-        end
+        if tr.Entity:GetClass():find("headcrab") then finalDamage = math.min(finalDamage, 8) end
 
-        -- APPLY DAMAGE
         local dmginfo = DamageInfo()
         dmginfo:SetAttacker(owner)
         dmginfo:SetInflictor(self)
@@ -116,19 +110,13 @@ function SWEP:MeleeStrike(damage, ragdollChance)
         dmginfo:SetDamageForce(owner:GetAimVector() * (finalDamage * 100))
         tr.Entity:TakeDamageInfo(dmginfo)
 
-        -- PROP KNOCKBACK
         if tr.Entity:GetClass() == "prop_physics" then
             local phys = tr.Entity:GetPhysicsObject()
-            if IsValid(phys) then
-                phys:ApplyForceCenter(owner:GetAimVector() * (finalDamage * 250) + Vector(0, 0, 200))
-            end
+            if IsValid(phys) then phys:ApplyForceCenter(owner:GetAimVector() * (finalDamage * 250) + Vector(0, 0, 200)) end
         end
 
-        -- NPC KNOCKBACK
         if tr.Entity:IsNPC() and tr.Entity:Health() > 0 and not tr.Entity.IsRagdolled then
-            if math.random(1, 100) <= ragdollChance then 
-                self:RagdollNPC(tr.Entity, finalDamage)
-            end
+            if math.random(1, 100) <= ragdollChance then self:RagdollNPC(tr.Entity, finalDamage) end
         end
     end
 end
@@ -139,6 +127,7 @@ if SERVER then
         npc.IsRagdolled = true
         npc:SetNoDraw(true)
         npc:SetSolid(SOLID_NONE)
+        
         local ragdoll = ents.Create("prop_ragdoll")
         ragdoll:SetModel(npc:GetModel())
         ragdoll:SetPos(npc:GetPos())
@@ -147,36 +136,44 @@ if SERVER then
         ragdoll:SetColor(npc:GetColor())
         ragdoll:SetMaterial(npc:GetMaterial())
         ragdoll:Spawn()
+        
         for i = 0, npc:GetNumBodyGroups() - 1 do ragdoll:SetBodygroup(i, npc:GetBodygroup(i)) end
+        
         local owner = self:GetOwner()
         if IsValid(owner) then
-            local physObjects = ragdoll:GetPhysicsObjectCount()
-            local forceMultiplier = 15 
-            for i = 0, physObjects - 1 do
-                local phys = ragdoll:GetPhysicsObjectNum(i)
-                if IsValid(phys) then
-                    phys:SetVelocity(owner:GetAimVector() * (damage * forceMultiplier) + Vector(0, 0, 100))
-                end
-            end
+            local phys = ragdoll:GetPhysicsObject()
+            if IsValid(phys) then phys:SetVelocity(owner:GetAimVector() * (damage * 15) + Vector(0, 0, 100)) end
         end
+
         local timerID = "ShovelRagdoll_" .. ragdoll:EntIndex()
-        local duration = math.random(4, 7)
-        local wakeUpTime = CurTime() + duration
+        local wakeUpTime = CurTime() + math.random(4, 7)
+
         timer.Create(timerID, 0, 0, function()
-            if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 then
+            -- FIX: If NPC dies, make it visible and stop our custom ragdoll behavior
+            if IsValid(npc) and npc:Health() <= 0 then
+                npc:SetNoDraw(false)
+                npc:SetSolid(SOLID_BBOX)
+                npc.IsRagdolled = false
                 if IsValid(ragdoll) then ragdoll:Remove() end
+                timer.Remove(timerID)
+                return
+            end
+
+            if not IsValid(ragdoll) then
                 if IsValid(npc) then
                     npc:SetNoDraw(false)
                     npc:SetSolid(SOLID_BBOX)
                     npc.IsRagdolled = false
-                    if npc:Health() <= 0 then npc:TakeDamage(1, owner, self) end
                 end
                 timer.Remove(timerID)
                 return
             end
+
+            -- Keep NPC synced to ragdoll
             local physBone = ragdoll:GetPhysicsObjectNum(0)
             if IsValid(physBone) then npc:SetPos(physBone:GetPos()) else npc:SetPos(ragdoll:GetPos()) end
             npc:SetAngles(ragdoll:GetAngles())
+
             if CurTime() >= wakeUpTime then
                 timer.Remove(timerID)
                 if IsValid(npc) and IsValid(ragdoll) then
@@ -188,15 +185,6 @@ if SERVER then
                 end
             end
         end)
-        function ragdoll:OnTakeDamage(dmginfo)
-            if IsValid(npc) then
-                npc:TakeDamageInfo(dmginfo)
-                local effectdata = EffectData()
-                effectdata:SetOrigin(dmginfo:GetDamagePosition())
-                effectdata:SetMagnitude(1)
-                util.Effect("BloodImpact", effectdata)
-            end
-        end
     end
 end
 
