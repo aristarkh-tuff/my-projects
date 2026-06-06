@@ -4,7 +4,8 @@ SWEP.PrintName = "Heavy Shovel"
 SWEP.Author = "You"
 SWEP.Instructions = "Left Click: Swing | Right Click: Charge"
 SWEP.Category = "Custom Melee"
-SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/heavy_shovel")
+-- Make sure this texture exists or it will error
+SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/heavy_shovel") 
 
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -14,17 +15,16 @@ SWEP.WorldModel = "models/props_junk/shovel01a.mdl"
 SWEP.UseHands = true
 SWEP.HoldType = "melee2"
 
-SWEP.VM_Pos_Forward = 10
-SWEP.VM_Pos_Right = 5
-SWEP.VM_Pos_Up = -5
+-- NEW: Use this to adjust your viewmodel position/angle
+SWEP.ViewModelOffset = Vector(10, 5, -5)
+SWEP.ViewModelAngleOffset = Angle(0, 0, 0)
 
--- Adjusted Offset for "blade-up" orientation in hand
+-- World Model Offset
 SWEP.Offset = {
     Pos = { Up = 2, Right = 1, Forward = 4 },
     Ang = { Up = 0, Right = 360, Forward = 0 }
 }
 
--- Primary and secondary base variables to prevent prediction errors
 SWEP.Primary.ClipSize = -1
 SWEP.Primary.DefaultClip = -1
 SWEP.Primary.Automatic = true
@@ -35,6 +35,19 @@ SWEP.Secondary.DefaultClip = -1
 SWEP.Secondary.Automatic = true
 SWEP.Secondary.Ammo = "none"
 
+-- FIXED: This moves the model in your view
+function SWEP:GetViewModelPosition(pos, ang)
+    pos = pos + (ang:Forward() * self.ViewModelOffset.x)
+    pos = pos + (ang:Right() * self.ViewModelOffset.y)
+    pos = pos + (ang:Up() * self.ViewModelOffset.z)
+    
+    ang:RotateAroundAxis(ang:Forward(), self.ViewModelAngleOffset.r)
+    ang:RotateAroundAxis(ang:Right(), self.ViewModelAngleOffset.p)
+    ang:RotateAroundAxis(ang:Up(), self.ViewModelAngleOffset.y)
+    
+    return pos, ang
+end
+
 function SWEP:DrawHUD()
     if self:GetIsCharging() then
         local chargeTime = CurTime() - self:GetChargeStartTime()
@@ -44,17 +57,18 @@ function SWEP:DrawHUD()
         local scrW, scrH = ScrW(), ScrH()
         local barW, barH = 250, 25
         local x, y = (scrW - barW) / 2, scrH - 150
+        
         surface.SetDrawColor(0, 0, 0, 180)
         surface.DrawRect(x, y, barW, barH)
         surface.SetDrawColor(255, 140, 0, 255)
         surface.DrawRect(x, y, barW * dmgRatio, barH)
         surface.DrawOutlinedRect(x, y, barW, barH)
+        
         draw.SimpleText("Shovel Charge", "DermaDefaultBold", x + barW/2, y - 18, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_BOTTOM)
         draw.SimpleText("Dmg: " .. currentDmg .. " | KO: " .. currentChance .. "%", "DermaDefault", x + barW/2, y + barH/2 - 6, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
     end
 end
 
--- Third person swing animation sync using BoneMatrix
 function SWEP:DrawWorldModel()
     local owner = self:GetOwner()
     if not IsValid(owner) then self:DrawModel() return end
@@ -64,7 +78,6 @@ function SWEP:DrawWorldModel()
     
     local pos, ang = owner:GetBonePosition(boneIndex)
     
-    -- Apply local offset
     local right = ang:Right()
     local up = ang:Up()
     local forward = ang:Forward()
@@ -187,12 +200,10 @@ if SERVER then
         ragdoll:SetMaterial(npc:GetMaterial())
         ragdoll:Spawn()
         
-        -- Copy bodygroups
         for i = 0, npc:GetNumBodyGroups() - 1 do 
             ragdoll:SetBodygroup(i, npc:GetBodygroup(i)) 
         end
         
-        -- Give the ragdoll physical push force based on the hit direction
         local owner = self:GetOwner()
         if IsValid(owner) then
             local physObjects = ragdoll:GetPhysicsObjectCount()
@@ -208,7 +219,6 @@ if SERVER then
         local duration = math.random(4, 7)
         local wakeUpTime = CurTime() + duration
 
-        -- 1. TRACKING LOOP
         timer.Create(timerID, 0, 0, function()
             if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 then
                 if IsValid(ragdoll) then ragdoll:Remove() end
@@ -245,11 +255,9 @@ if SERVER then
             end
         end)
 
-        -- 2. DAMAGE HOOK
         function ragdoll:OnTakeDamage(dmginfo)
             if IsValid(npc) then
                 npc:TakeDamageInfo(dmginfo)
-                
                 local effectdata = EffectData()
                 effectdata:SetOrigin(dmginfo:GetDamagePosition())
                 effectdata:SetMagnitude(1)
