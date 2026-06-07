@@ -1,5 +1,7 @@
 AddCSLuaFile()
 
+print("--- SHOVEL DEBUG: SCRIPT IS LOADING ---")
+
 if SERVER then
     util.AddNetworkString("ShovelKOEvent")
 end
