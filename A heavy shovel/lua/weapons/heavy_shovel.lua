@@ -5,8 +5,8 @@ if SERVER then
 end
 
 SWEP.PrintName = "Heavy Shovel"
-SWEP.Author = "You"
-SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release (10% KO @ >50%, 80% KO @ 100%)"
+SWEP.Author = "Aristarkh"
+SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release | if it turns light blue = 5 percent 1 min knock out| if turns very light blue 50 percent 1 minute knock out"
 SWEP.Category = "Custom Melee"
 SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/thashovel")
 
@@ -44,6 +44,49 @@ if CLIENT then
     end)
 end
 
+function SWEP:Initialize()
+    self:SetWeaponHoldType(self.HoldType)
+end
+
+-- --- FIXED DROP HOOK ---
+function SWEP:OnDrop()
+    local owner = self:GetOwner()
+    if not IsValid(owner) or not owner:IsPlayer() then return end
+
+    local spawnPos = owner:GetShootPos() + (owner:GetAimVector() * 30)
+    
+    local shovelProp = ents.Create("prop_physics")
+    if not IsValid(shovelProp) then return end
+
+    shovelProp:SetModel(self.WorldModel)
+    shovelProp:SetPos(spawnPos)
+    shovelProp:SetAngles(owner:GetAngles())
+    
+    shovelProp:Spawn()
+    shovelProp:Activate() 
+    
+    shovelProp:PhysicsInit(SOLID_VPHYSICS)
+    shovelProp:SetMoveType(MOVETYPE_VPHYSICS)
+    shovelProp:SetSolid(SOLID_VPHYSICS)
+    
+    local phys = shovelProp:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:Wake()
+        phys:EnableMotion(true)
+        phys:SetVelocity(owner:GetAimVector() * 200)
+    end
+
+    shovelProp:SetUseType(SIMPLE_USE)
+    
+    function shovelProp:Use(activator)
+        if activator:IsPlayer() then
+            activator:Give("weapon_heavyshovel") 
+            self:Remove()
+        end
+    end
+end
+
+-- --- MELEE LOGIC ---
 function SWEP:ViewModelDrawn() return false end
 
 function SWEP:GetViewModelPosition(pos, ang)
@@ -86,11 +129,11 @@ function SWEP:Think()
         local roll = math.random(1, 100)
         local isLuckyKO = false
         
-        -- Randomized thresholds per swing
+        -- MODIFIED PROBABILITY RANGES HERE
         if chargeRatio >= 1.0 then
-            isLuckyKO = (roll <= math.random(80, 100))
+            isLuckyKO = (roll <= math.random(50, 100)) -- Reduced 80-100 to 50-100
         elseif chargeRatio >= 0.5 then
-            isLuckyKO = (roll <= math.random(50, 80))
+            isLuckyKO = (roll <= math.random(25, 50))  -- Reduced 50-80 to 25-50
         end
         
         owner:SetAnimation(PLAYER_ATTACK1)
@@ -146,29 +189,56 @@ function SWEP:MeleeStrike(damage, ragdollChance, forceFullKO)
                 self:RagdollNPC(tr.Entity, finalDamage, forceFullKO) 
             end
         end
+
+        -- NEW PLAYER RAGDOLL LOGIC
+        if tr.Entity:IsPlayer() and tr.Entity:Alive() and not tr.Entity:GetNWBool("IsRagdolled") then
+            if (math.random(1, 100) <= ragdollChance) or forceFullKO then
+                local dur = forceFullKO and 30 or math.random(2, 10)
+                self:RagdollPlayer(tr.Entity, dur)
+            end
+        end
     end
 end
 
+-- --- NPC & PLAYER RAGDOLL SYSTEM ---
 if SERVER then
+
+    -- PLAYER RAGDOLL FUNCTION
+    function SWEP:RagdollPlayer(ply, duration)
+        if ply:GetNWBool("IsRagdolled") then return end
+        
+        local rag = ents.Create("prop_ragdoll")
+        rag:SetModel(ply:GetModel())
+        rag:SetPos(ply:GetPos())
+        rag:SetAngles(ply:GetAngles())
+        rag:Spawn()
+        
+        ply:SetNWBool("IsRagdolled", true)
+        ply:Spectate(OBS_MODE_CHASE)
+        ply:SpectateEntity(rag)
+        
+        timer.Simple(duration, function()
+            if IsValid(ply) and IsValid(rag) then
+                ply:UnSpectate()
+                ply:SetPos(rag:GetPos() + Vector(0, 0, 10))
+                ply:SetNWBool("IsRagdolled", false)
+                rag:Remove()
+            end
+        end)
+    end
+
     function SWEP:RagdollNPC(npc, damage, isFullKO)
         if not IsValid(npc) or npc.IsRagdolled then return end
         
-        -- DISARM (Drop Entity Weapon)
         local activeWep = npc:GetActiveWeapon()
-        if IsValid(activeWep) then
-            npc:DropWeapon(activeWep)
-        end
+        if IsValid(activeWep) then npc:DropWeapon(activeWep) end
 
-        -- DISARM (Bodygroup Visuals)
         for i = 0, npc:GetNumBodyGroups() - 1 do
             local name = string.lower(npc:GetBodygroupName(i))
-            if name == "weapon" or name == "gun" or name == "main" then
-                npc:SetBodygroup(i, 0)
-            end
+            if name == "weapon" or name == "gun" or name == "main" then npc:SetBodygroup(i, 0) end
         end
         
-        -- TOTAL SILENCE (Engine Level)
-        npc:AddSpawnFlags(65536) -- SF_NPC_GAG
+        npc:AddSpawnFlags(65536) 
         if npc.IsVJBaseNPC then 
             npc.DisableSound = true 
             npc:SetSoundVolume(0, 4) 
@@ -182,7 +252,6 @@ if SERVER then
         npc:ClearEnemy()
         npc:StopMoving()
         
-        -- Turret handling
         npc:Fire("Disable")
         npc:Fire("Close")
         
@@ -199,18 +268,12 @@ if SERVER then
         ragdoll:SetColor(npc:GetColor())
         ragdoll:SetMaterial(npc:GetMaterial())
         
-        -- Apply bodygroup to ragdoll too
-        for i = 0, npc:GetNumBodyGroups() - 1 do
-            ragdoll:SetBodygroup(i, npc:GetBodygroup(i))
-        end
+        for i = 0, npc:GetNumBodyGroups() - 1 do ragdoll:SetBodygroup(i, npc:GetBodygroup(i)) end
         
         ragdoll.AttachedNPC = npc
         ragdoll.IsPermanentlyDead = false
-        
         ragdoll:SetCollisionGroup(COLLISION_GROUP_NONE)
         ragdoll:Spawn()
-        
-        for i = 0, npc:GetNumBodyGroups() - 1 do ragdoll:SetBodygroup(i, npc:GetBodygroup(i)) end
         
         local owner = self:GetOwner()
         if IsValid(owner) then
@@ -278,14 +341,12 @@ if SERVER then
             if CurTime() >= wakeUpTime then
                 timer.Remove(timerID)
                 if IsValid(npc) and IsValid(ragdoll) then
-                    -- Restore Sound & remove silence flag
                     npc:RemoveSpawnFlags(65536)
                     if npc.IsVJBaseNPC then 
                         npc.DisableSound = false 
                         npc:SetSoundVolume(1, 4) 
                     end
                     
-                    -- Calculate turn away angle
                     local faceAway = (npc:GetPos() - owner:GetPos()):Angle()
                     faceAway.p = 0
                     faceAway.r = 0
@@ -311,6 +372,7 @@ if SERVER then
     end
 end
 
+-- --- HUD & RENDER ---
 function SWEP:DrawHUD()
     if self:GetIsCharging() then
         local chargeTime = math.Clamp(CurTime() - self:GetChargeStartTime(), 0, 10)
@@ -365,8 +427,4 @@ end
 function SWEP:SetupDataTables()
     self:NetworkVar("Bool", 0, "IsCharging")
     self:NetworkVar("Float", 0, "ChargeStartTime")
-end
-
-function SWEP:Initialize()
-    self:SetWeaponHoldType(self.HoldType)
 end
