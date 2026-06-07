@@ -6,7 +6,7 @@ end
 
 SWEP.PrintName = "Heavy Shovel"
 SWEP.Author = "You"
-SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release (10% KO @ >20%, 80% KO @ >75%)"
+SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release (10% KO @ >50%, 80% KO @ 100%)"
 SWEP.Category = "Custom Melee"
 SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/thashovel")
 
@@ -85,10 +85,12 @@ function SWEP:Think()
         
         local roll = math.random(1, 100)
         local isLuckyKO = false
-        if chargeRatio >= 0.75 then
-            isLuckyKO = (roll <= 80)
-        elseif chargeRatio >= 0.2 then
-            isLuckyKO = (roll <= 10)
+        
+        -- Randomized thresholds per swing
+        if chargeRatio >= 1.0 then
+            isLuckyKO = (roll <= math.random(80, 100))
+        elseif chargeRatio >= 0.5 then
+            isLuckyKO = (roll <= math.random(50, 80))
         end
         
         owner:SetAnimation(PLAYER_ATTACK1)
@@ -151,6 +153,39 @@ if SERVER then
     function SWEP:RagdollNPC(npc, damage, isFullKO)
         if not IsValid(npc) or npc.IsRagdolled then return end
         
+        -- DISARM (Drop Entity Weapon)
+        local activeWep = npc:GetActiveWeapon()
+        if IsValid(activeWep) then
+            npc:DropWeapon(activeWep)
+        end
+
+        -- DISARM (Bodygroup Visuals)
+        for i = 0, npc:GetNumBodyGroups() - 1 do
+            local name = string.lower(npc:GetBodygroupName(i))
+            if name == "weapon" or name == "gun" or name == "main" then
+                npc:SetBodygroup(i, 0)
+            end
+        end
+        
+        -- TOTAL SILENCE (Engine Level)
+        npc:AddSpawnFlags(65536) -- SF_NPC_GAG
+        if npc.IsVJBaseNPC then 
+            npc.DisableSound = true 
+            npc:SetSoundVolume(0, 4) 
+        end
+        
+        npc:AddEntityRelationship(self:GetOwner(), D_NU, 99)
+        npc:SetEnemy(NULL)
+        npc:SetNPCState(NPC_STATE_IDLE)
+        npc:SetCondition(67)
+        npc:CapabilitiesRemove(CAP_USE_WEAPONS)
+        npc:ClearEnemy()
+        npc:StopMoving()
+        
+        -- Turret handling
+        npc:Fire("Disable")
+        npc:Fire("Close")
+        
         npc.IsRagdolled = true
         npc:SetNoDraw(true)
         npc:SetSolid(SOLID_NONE)
@@ -163,6 +198,11 @@ if SERVER then
         ragdoll:SetSkin(npc:GetSkin())
         ragdoll:SetColor(npc:GetColor())
         ragdoll:SetMaterial(npc:GetMaterial())
+        
+        -- Apply bodygroup to ragdoll too
+        for i = 0, npc:GetNumBodyGroups() - 1 do
+            ragdoll:SetBodygroup(i, npc:GetBodygroup(i))
+        end
         
         ragdoll.AttachedNPC = npc
         ragdoll.IsPermanentlyDead = false
@@ -207,22 +247,16 @@ if SERVER then
                 end
             end
 
-            -- PERMANENT COMA: If headshot, set flag, play sound, apply decal, and kill NPC
             if isHeadshot or (npc:Health() - dmginfo:GetDamage() <= 0) then
                 self.IsPermanentlyDead = true
-                
-                -- Sound Effect
                 self:EmitSound("physics/body/body_medium_break2.wav", 75, 100)
                 
-                -- Blood Effect
                 local effectdata = EffectData()
                 effectdata:SetOrigin(dmginfo:GetDamagePosition())
                 util.Effect("BloodImpact", effectdata)
                 
-                -- Blood Decal
                 util.Decal("Blood", dmginfo:GetDamagePosition() + Vector(0,0,1), dmginfo:GetDamagePosition() - Vector(0,0,1))
                 
-                -- Kill NPC
                 npc:TakeDamage(npc:Health() + 10, dmginfo:GetAttacker(), dmginfo:GetInflictor())
                 return
             end
@@ -233,24 +267,44 @@ if SERVER then
 
         timer.Create(timerID, 0, 0, function()
             if not IsValid(ragdoll) then timer.Remove(timerID) return end
-            if ragdoll.IsPermanentlyDead then return end -- Permanent coma, do nothing
+            if ragdoll.IsPermanentlyDead then return end
             
             local npc = ragdoll.AttachedNPC
             if not IsValid(npc) then timer.Remove(timerID) return end
             
             local physBone = ragdoll:GetPhysicsObjectNum(0)
             if IsValid(physBone) then npc:SetPos(physBone:GetPos()) else npc:SetPos(ragdoll:GetPos()) end
-            npc:SetAngles(ragdoll:GetAngles())
             
             if CurTime() >= wakeUpTime then
                 timer.Remove(timerID)
                 if IsValid(npc) and IsValid(ragdoll) then
+                    -- Restore Sound & remove silence flag
+                    npc:RemoveSpawnFlags(65536)
+                    if npc.IsVJBaseNPC then 
+                        npc.DisableSound = false 
+                        npc:SetSoundVolume(1, 4) 
+                    end
+                    
+                    -- Calculate turn away angle
+                    local faceAway = (npc:GetPos() - owner:GetPos()):Angle()
+                    faceAway.p = 0
+                    faceAway.r = 0
+                    
                     npc:SetPos(ragdoll:GetPos())
+                    npc:SetAngles(faceAway)
                     ragdoll:Remove()
                     npc:SetNoDraw(false)
                     npc:SetSolid(SOLID_BBOX)
                     npc:SetMoveType(MOVETYPE_STEP)
                     npc.IsRagdolled = false
+                    
+                    timer.Simple(2.0, function()
+                        if IsValid(npc) then
+                            npc:CapabilitiesAdd(CAP_USE_WEAPONS)
+                            npc:Fire("Enable")
+                            npc:Fire("Open")
+                        end
+                    end)
                 end
             end
         end)
@@ -271,9 +325,9 @@ function SWEP:DrawHUD()
         surface.SetDrawColor(0, 0, 0, 180)
         surface.DrawRect(x, y, barW, barH)
         
-        if chargeRatio >= 0.75 then 
+        if chargeRatio >= 1.0 then 
             surface.SetDrawColor(100, 220, 255, 255) 
-        elseif chargeRatio >= 0.2 then 
+        elseif chargeRatio >= 0.5 then 
             surface.SetDrawColor(0, 150, 255, 255) 
         else 
             surface.SetDrawColor(255, 140, 0, 255) 
