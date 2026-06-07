@@ -1,10 +1,14 @@
 AddCSLuaFile()
 
+if SERVER then
+    util.AddNetworkString("ShovelKOEvent")
+end
+
 SWEP.PrintName = "Heavy Shovel"
 SWEP.Author = "You"
-SWEP.Instructions = "Left Click: Swing | Right Click: Charge"
+SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release (10% KO @ >20%, 80% KO @ >75%)"
 SWEP.Category = "Custom Melee"
-SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/heavy_shovel")
+SWEP.WepSelectIcon = surface.GetTextureID("vgui/entities/thashovel")
 
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -32,53 +36,69 @@ SWEP.Secondary.DefaultClip = -1
 SWEP.Secondary.Automatic = true
 SWEP.Secondary.Ammo = "none"
 
-function SWEP:ViewModelDrawn()
-    return false 
+local LastKOTime = 0
+
+if CLIENT then
+    net.Receive("ShovelKOEvent", function()
+        LastKOTime = CurTime()
+    end)
 end
+
+function SWEP:ViewModelDrawn() return false end
 
 function SWEP:GetViewModelPosition(pos, ang)
     pos = pos + (ang:Forward() * self.ViewModelOffset.x)
     pos = pos + (ang:Right() * self.ViewModelOffset.y)
     pos = pos + (ang:Up() * self.ViewModelOffset.z)
-    
     ang:RotateAroundAxis(ang:Right(), self.ViewModelAngleOffset.p)
     ang:RotateAroundAxis(ang:Up(), self.ViewModelAngleOffset.y)
     ang:RotateAroundAxis(ang:Forward(), self.ViewModelAngleOffset.r)
-    
     return pos, ang
 end
 
 function SWEP:PrimaryAttack()
     if self:GetIsCharging() then return end
     local owner = self:GetOwner()
-    if IsValid(owner) then owner:SetAnimation(PLAYER_ATTACK1) end
-    self:SetNextPrimaryFire(CurTime() + 0.8)
-    self:MeleeStrike(10, 30)
+    if not IsValid(owner) then return end
+    owner:SetAnimation(PLAYER_ATTACK1)
+    self:MeleeStrike(10, 0, false)
+    self:SetNextPrimaryFire(CurTime() + 0.6)
 end
 
 function SWEP:SecondaryAttack()
-    if not self:GetIsCharging() then
-        self:SetNextSecondaryFire(CurTime() + 0.5) 
-        self:SetIsCharging(true)
-        self:SetChargeStartTime(CurTime())
-    end
+    if self:GetIsCharging() then return end
+    self:SetIsCharging(true)
+    self:SetChargeStartTime(CurTime())
 end
 
 function SWEP:Think()
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
+
     if self:GetIsCharging() and not owner:KeyDown(IN_ATTACK2) then
-        self:SetIsCharging(false)
-        self:SetNextPrimaryFire(CurTime() + 1)
-        local chargeTime = CurTime() - self:GetChargeStartTime()
+        local chargeTime = math.Clamp(CurTime() - self:GetChargeStartTime(), 0, 10)
+        local chargeRatio = chargeTime / 10
+        
         local isTap = chargeTime < 0.3
-        local calculatedDmg = isTap and 5 or 10 + math.Clamp((chargeTime / 10) * 35, 0, 35)
+        local calculatedDmg = isTap and 5 or 10 + math.Clamp(chargeRatio * 40, 0, 40)
         local calculatedChance = isTap and 0 or 30 + math.Clamp((chargeTime / 5) * 65, 0, 65)
-        self:MeleeStrike(calculatedDmg, calculatedChance)
+        
+        local roll = math.random(1, 100)
+        local isLuckyKO = false
+        if chargeRatio >= 0.75 then
+            isLuckyKO = (roll <= 80)
+        elseif chargeRatio >= 0.2 then
+            isLuckyKO = (roll <= 10)
+        end
+        
+        owner:SetAnimation(PLAYER_ATTACK1)
+        self:MeleeStrike(calculatedDmg, calculatedChance, isLuckyKO)
+        self:SetIsCharging(false)
+        self:SetNextPrimaryFire(CurTime() + 0.5)
     end
 end
 
-function SWEP:MeleeStrike(damage, ragdollChance)
+function SWEP:MeleeStrike(damage, ragdollChance, forceFullKO)
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
     owner:LagCompensation(true)
@@ -95,7 +115,11 @@ function SWEP:MeleeStrike(damage, ragdollChance)
     owner:LagCompensation(false)
     
     if IsFirstTimePredicted() then
-        if tr.Hit then self:EmitSound("physics/metal/metal_solid_impact_bullet1.wav", 75, 80) else self:EmitSound("weapons/iceaxe/iceaxe_swing1.wav") end
+        if tr.Hit then 
+            self:EmitSound("physics/metal/metal_canister_impact_hard1.wav", 75, 65) 
+        else 
+            self:EmitSound("weapons/iceaxe/iceaxe_swing1.wav", 75, 60) 
+        end
     end
     
     if SERVER and tr.Hit and IsValid(tr.Entity) then
@@ -116,19 +140,21 @@ function SWEP:MeleeStrike(damage, ragdollChance)
         end
 
         if tr.Entity:IsNPC() and tr.Entity:Health() > 0 and not tr.Entity.IsRagdolled then
-            if math.random(1, 100) <= ragdollChance then self:RagdollNPC(tr.Entity, finalDamage) end
+            if (math.random(1, 100) <= ragdollChance) or forceFullKO then 
+                self:RagdollNPC(tr.Entity, finalDamage, forceFullKO) 
+            end
         end
     end
 end
 
 if SERVER then
-    function SWEP:RagdollNPC(npc, damage)
+    function SWEP:RagdollNPC(npc, damage, isFullKO)
         if not IsValid(npc) or npc.IsRagdolled then return end
         
         npc.IsRagdolled = true
         npc:SetNoDraw(true)
         npc:SetSolid(SOLID_NONE)
-        npc:SetMoveType(MOVETYPE_NONE) -- This stops the NPC from trying to stand up
+        npc:SetMoveType(MOVETYPE_NONE)
         
         local ragdoll = ents.Create("prop_ragdoll")
         ragdoll:SetModel(npc:GetModel())
@@ -137,71 +163,85 @@ if SERVER then
         ragdoll:SetSkin(npc:GetSkin())
         ragdoll:SetColor(npc:GetColor())
         ragdoll:SetMaterial(npc:GetMaterial())
-        ragdoll:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+        
+        ragdoll.AttachedNPC = npc
+        ragdoll.IsPermanentlyDead = false
+        
+        ragdoll:SetCollisionGroup(COLLISION_GROUP_NONE)
         ragdoll:Spawn()
         
         for i = 0, npc:GetNumBodyGroups() - 1 do ragdoll:SetBodygroup(i, npc:GetBodygroup(i)) end
         
         local owner = self:GetOwner()
         if IsValid(owner) then
+            if isFullKO then
+                owner:EmitSound("physics/body/body_medium_impact_hard1.wav", 75, 100)
+                net.Start("ShovelKOEvent")
+                net.Send(owner)
+            end
+            
             local phys = ragdoll:GetPhysicsObject()
-            if IsValid(phys) then phys:SetVelocity(owner:GetAimVector() * (damage * 15) + Vector(0, 0, 100)) end
+            if IsValid(phys) then 
+                phys:Wake()
+                local forceDir = owner:GetAimVector()
+                forceDir.z = 0.3
+                phys:ApplyForceCenter(forceDir * (damage * 400) + Vector(0, 0, 1000)) 
+            end
         end
 
         local timerID = "ShovelRagdoll_" .. ragdoll:EntIndex()
-        local wakeUpTime = CurTime() + math.random(4, 7)
+        local wakeUpTime = CurTime() + (isFullKO and 60 or math.random(2, 20))
 
-        -- INTERCEPT DAMAGE: If lethal, clean up instantly so the NPC dies naturally
         function ragdoll:OnTakeDamage(dmginfo)
-            if IsValid(npc) then
-                if npc:Health() - dmginfo:GetDamage() <= 0 then
-                    -- PRE-DEATH CLEANUP
-                    if IsValid(ragdoll) then ragdoll:Remove() end
-                    npc:SetNoDraw(false)
-                    npc:SetSolid(SOLID_BBOX)
-                    npc:SetMoveType(MOVETYPE_STEP)
-                    npc.IsRagdolled = false
-                    -- Now apply the lethal damage
-                    npc:TakeDamageInfo(dmginfo)
-                else
-                    -- Non-lethal, just pass damage to NPC
-                    npc:TakeDamageInfo(dmginfo)
+            if self.IsPermanentlyDead then return end
+            
+            local npc = self.AttachedNPC
+            if not IsValid(npc) then return end
+            
+            local isHeadshot = false
+            local headBone = self:LookupBone("ValveBiped.Bip01_Head1")
+            if headBone then
+                local headPos, _ = self:GetBonePosition(headBone)
+                if headPos:Distance(dmginfo:GetDamagePosition()) < 15 then
+                    isHeadshot = true
                 end
             end
+
+            -- PERMANENT COMA: If headshot, set flag, play sound, apply decal, and kill NPC
+            if isHeadshot or (npc:Health() - dmginfo:GetDamage() <= 0) then
+                self.IsPermanentlyDead = true
+                
+                -- Sound Effect
+                self:EmitSound("physics/body/body_medium_break2.wav", 75, 100)
+                
+                -- Blood Effect
+                local effectdata = EffectData()
+                effectdata:SetOrigin(dmginfo:GetDamagePosition())
+                util.Effect("BloodImpact", effectdata)
+                
+                -- Blood Decal
+                util.Decal("Blood", dmginfo:GetDamagePosition() + Vector(0,0,1), dmginfo:GetDamagePosition() - Vector(0,0,1))
+                
+                -- Kill NPC
+                npc:TakeDamage(npc:Health() + 10, dmginfo:GetAttacker(), dmginfo:GetInflictor())
+                return
+            end
+
+            local newHealth = npc:Health() - dmginfo:GetDamage()
+            if newHealth < 5 then npc:SetHealth(5) else npc:SetHealth(newHealth) end
         end
 
         timer.Create(timerID, 0, 0, function()
-            -- 1. Check if NPC died from something else (e.g., world damage)
-            if not IsValid(npc) or npc:Health() <= 0 then
-                if IsValid(ragdoll) then ragdoll:Remove() end
-                if IsValid(npc) then
-                    npc:SetNoDraw(false)
-                    npc:SetSolid(SOLID_BBOX)
-                    npc:SetMoveType(MOVETYPE_STEP)
-                    npc.IsRagdolled = false
-                end
-                timer.Remove(timerID)
-                return
-            end
-
-            -- 2. If proxy is missing, restore NPC
-            if not IsValid(ragdoll) then
-                if IsValid(npc) then
-                    npc:SetNoDraw(false)
-                    npc:SetSolid(SOLID_BBOX)
-                    npc:SetMoveType(MOVETYPE_STEP)
-                    npc.IsRagdolled = false
-                end
-                timer.Remove(timerID)
-                return
-            end
-
-            -- 3. Sync positions
+            if not IsValid(ragdoll) then timer.Remove(timerID) return end
+            if ragdoll.IsPermanentlyDead then return end -- Permanent coma, do nothing
+            
+            local npc = ragdoll.AttachedNPC
+            if not IsValid(npc) then timer.Remove(timerID) return end
+            
             local physBone = ragdoll:GetPhysicsObjectNum(0)
             if IsValid(physBone) then npc:SetPos(physBone:GetPos()) else npc:SetPos(ragdoll:GetPos()) end
             npc:SetAngles(ragdoll:GetAngles())
-
-            -- 4. Wake up logic
+            
             if CurTime() >= wakeUpTime then
                 timer.Remove(timerID)
                 if IsValid(npc) and IsValid(ragdoll) then
@@ -219,20 +259,36 @@ end
 
 function SWEP:DrawHUD()
     if self:GetIsCharging() then
-        local chargeTime = CurTime() - self:GetChargeStartTime()
-        local dmgRatio = math.Clamp(chargeTime / 10, 0, 1)
-        local currentDmg = math.Round(10 + (dmgRatio * 35))
+        local chargeTime = math.Clamp(CurTime() - self:GetChargeStartTime(), 0, 10)
+        local chargeRatio = math.Clamp(chargeTime / 10, 0, 1)
+        local chargePercent = math.Round(chargeRatio * 100)
+        local currentDmg = math.Round(10 + (chargeRatio * 40))
         local currentChance = math.Round(30 + (math.Clamp(chargeTime / 5, 0, 1) * 65))
         local scrW, scrH = ScrW(), ScrH()
         local barW, barH = 250, 25
         local x, y = (scrW - barW) / 2, scrH - 150
+        
         surface.SetDrawColor(0, 0, 0, 180)
         surface.DrawRect(x, y, barW, barH)
-        surface.SetDrawColor(255, 140, 0, 255)
-        surface.DrawRect(x, y, barW * dmgRatio, barH)
+        
+        if chargeRatio >= 0.75 then 
+            surface.SetDrawColor(100, 220, 255, 255) 
+        elseif chargeRatio >= 0.2 then 
+            surface.SetDrawColor(0, 150, 255, 255) 
+        else 
+            surface.SetDrawColor(255, 140, 0, 255) 
+        end
+        
+        surface.DrawRect(x, y, barW * chargeRatio, barH)
         surface.DrawOutlinedRect(x, y, barW, barH)
-        draw.SimpleText("Shovel Charge", "DermaDefaultBold", x + barW/2, y - 18, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_BOTTOM)
+        
+        draw.SimpleText("Shovel Charge: " .. chargePercent .. "%", "DermaDefaultBold", x + barW/2, y - 18, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_BOTTOM)
         draw.SimpleText("Dmg: " .. currentDmg .. " | KO: " .. currentChance .. "%", "DermaDefault", x + barW/2, y + barH/2 - 6, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+    end
+
+    if CurTime() - LastKOTime < 2.0 then
+        local alpha = 255 - ((CurTime() - LastKOTime) * 127)
+        draw.SimpleText("KNOCKOUT!", "DermaDefaultBold", ScrW() / 2, ScrH() / 2 + 100, Color(255, 255, 255, alpha), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
     end
 end
 
