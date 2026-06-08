@@ -1,6 +1,0 @@
-{
-    "title": "Heavy Shovel",
-    "description": "Custom Heavy Shovel SWEP",
-    "type": "weapon",
-    "tags": [ "fun", "roleplay" ]
-}
