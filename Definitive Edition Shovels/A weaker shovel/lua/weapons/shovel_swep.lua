@@ -3,7 +3,7 @@ AddCSLuaFile()
 SWEP.PrintName          = "Charged Shovel"
 SWEP.Author             = "Aristarkh"
 SWEP.Instructions       = "Left Click: Normal swing (10 Dmg, 10% Ragdoll)\nHold Right Click: Charge heavy swing (Up to 30 Dmg, up to 30% Ragdoll)"
-SWEP.Category           = "Custom Meeles"
+SWEP.Category           = "Custom Melees"
 SWEP.Spawnable          = true
 SWEP.AdminOnly          = false
 
@@ -293,8 +293,9 @@ end
 
 function SWEP:PrimaryAttack()
     if self:GetIsCharging() then return end
-    self:SetNextPrimaryFire(CurTime() + 0.8)
-    self:SetNextSecondaryFire(CurTime() + 0.8)
+    -- Faster attack speed: 0.5s interval
+    self:SetNextPrimaryFire(CurTime() + 0.5)
+    self:SetNextSecondaryFire(CurTime() + 0.5)
     self:MeleeAttack(10, 0.1) 
 end
 
@@ -312,14 +313,14 @@ function SWEP:Think()
                 local holdTime = CurTime() - self:GetChargeStartTime()
                 holdTime = math.Clamp(holdTime, 0, 8) 
                 
-                -- Cap max damage at 30
                 local damage = 10 + ((holdTime / 8) * 20)
                 local ragdollChance = 0.1 + ((holdTime / 8) * 0.2)
                 
                 self:MeleeAttack(damage, ragdollChance)
                 self:SetIsCharging(false)
-                self:SetNextPrimaryFire(CurTime() + 1.0)
-                self:SetNextSecondaryFire(CurTime() + 1.0)
+                -- Faster reset speed: 0.5s interval
+                self:SetNextPrimaryFire(CurTime() + 0.5)
+                self:SetNextSecondaryFire(CurTime() + 0.5)
             end
         else
             self:SetIsCharging(false)
@@ -393,7 +394,7 @@ if CLIENT then
         if self:GetIsCharging() then
             local holdTime = CurTime() - self:GetChargeStartTime()
             local progress = math.Clamp(holdTime / 8, 0, 1)
-            local curDamage = math.Round(10 + (progress * 20)) -- Capped display at 30
+            local curDamage = math.Round(10 + (progress * 20))
             local curRagdoll = math.Round((0.1 + (progress * 0.2)) * 100)
             local curPercent = math.Round(progress * 100)
             

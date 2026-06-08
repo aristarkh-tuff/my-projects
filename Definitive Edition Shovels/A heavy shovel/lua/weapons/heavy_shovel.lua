@@ -158,6 +158,7 @@ function SWEP:SecondaryAttack()
     self:SetChargeStartTime(CurTime())
     self.ChargeViewActive = true
     self.ChargeViewStartTime = CurTime()
+    self:SetNextSecondaryFire(CurTime() + 0.6)
 end
 
 function SWEP:Think()
@@ -194,6 +195,7 @@ function SWEP:Think()
         self:MeleeStrike(calculatedDmg, calculatedChance, fullKOChance)
         self:SetIsCharging(false)
         self:SetNextPrimaryFire(CurTime() + 0.5)
+        self:SetNextSecondaryFire(CurTime() + 0.6)
     end
 end
 
@@ -409,7 +411,21 @@ if SERVER then
 
         function ragdoll:OnTakeDamage(dmginfo)
             if self.IsPermanentlyDead then return end
-            
+            local dmgType = dmginfo:GetDamageType()
+            local dmgAmt = dmginfo:GetDamage() or 0
+
+            -- If this ragdoll is gibbed by an explosion (or forced-gibbed), remove it immediately
+            if bit.band(dmgType, DMG_ALWAYSGIB) ~= 0 or (bit.band(dmgType, DMG_BLAST) ~= 0 and dmgAmt >= 50) then
+                self.IsPermanentlyDead = true
+                if IsValid(self.AttachedNPC) then
+                    self.AttachedNPC:Remove()
+                end
+                if IsValid(self) then
+                    self:Remove()
+                end
+                return
+            end
+
             local npc = self.AttachedNPC
             if not IsValid(npc) then return end
 
