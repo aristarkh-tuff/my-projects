@@ -141,10 +141,8 @@ local function KnockdownTarget(target, duration, damage, attacker)
             ragdoll:SetBodygroup(i, target:GetBodygroup(i))
         end
 
-        for i = 0, ragdoll:GetPhysicsObjectCount() - 1 do
-            local phys = ragdoll:GetPhysicsObjectNum(i)
-            if IsValid(phys) then phys:SetVelocity(pushDirection * (forceMultiplier * 1.3)) end
-        end
+        -- Do not forcibly fling NPC ragdolls; keep them stationary for realism.
+        -- Velocity application removed to avoid sending NPCs flying unnaturally.
 
         target:SetMaterial("vgui/clear")
         target:DrawShadow(false)
@@ -277,10 +275,16 @@ function SWEP:MeleeAttack(damage, ragdollChance)
                         local standUpTime = math.Rand(2, 10)
                         KnockdownTarget(tr.Entity, standUpTime, damage, owner)
                     else
-                        if tr.Entity:IsNPC() and tr.Entity:GetMoveType() == MOVETYPE_STEP then
-                            local shoveForce = owner:GetAimVector() * 100
-                            shoveForce.z = 0 
-                            tr.Entity:SetVelocity(shoveForce)
+                        -- Do not apply direct velocity to NPCs; it caused unrealistic knockback.
+                        -- Small pushes will still occur for physics props below.
+                    end
+
+                    -- Apply a modest, capped impulse to props so they react to hits visually.
+                    if tr.Entity:GetClass() == "prop_physics" then
+                        local phys = tr.Entity:GetPhysicsObject()
+                        if IsValid(phys) then
+                            local propForce = owner:GetAimVector() * math.Clamp(damage * 300, 0, 1200) + Vector(0, 0, 200)
+                            phys:ApplyForceCenter(propForce)
                         end
                     end
                 end
@@ -311,10 +315,10 @@ function SWEP:Think()
         if IsValid(owner) then
             if not owner:KeyDown(IN_ATTACK2) then
                 local holdTime = CurTime() - self:GetChargeStartTime()
-                holdTime = math.Clamp(holdTime, 0, 8) 
+                holdTime = math.Clamp(holdTime, 0, 4) 
                 
-                local damage = 10 + ((holdTime / 8) * 20)
-                local ragdollChance = 0.1 + ((holdTime / 8) * 0.2)
+                local damage = 10 + ((holdTime / 4) * 20)
+                local ragdollChance = 0.1 + ((holdTime / 4) * 0.2)
                 
                 self:MeleeAttack(damage, ragdollChance)
                 self:SetIsCharging(false)
@@ -393,7 +397,7 @@ if CLIENT then
     function SWEP:DrawHUD()
         if self:GetIsCharging() then
             local holdTime = CurTime() - self:GetChargeStartTime()
-            local progress = math.Clamp(holdTime / 8, 0, 1)
+            local progress = math.Clamp(holdTime / 4, 0, 1)
             local curDamage = math.Round(10 + (progress * 20))
             local curRagdoll = math.Round((0.1 + (progress * 0.2)) * 100)
             local curPercent = math.Round(progress * 100)
