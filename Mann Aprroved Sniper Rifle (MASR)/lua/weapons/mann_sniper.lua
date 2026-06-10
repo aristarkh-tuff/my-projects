@@ -8,13 +8,13 @@ end
 -- ADDON METADATA & DESCRIPTION
 -- ==========================================
 SWEP.PrintName    = "Mann Approved Sniper Rifle"
-SWEP.Author       = "Collaborator"
+SWEP.Author       = "Aristarkh"
 SWEP.Category     = "Mann Co. Tactical"
 SWEP.Spawnable    = true
 SWEP.AdminOnly    = false
 SWEP.CanDrop      = true 
 
-SWEP.Purpose      = "A 100% pin-point accurate sniper rifle equipped with a chargeable prototype laser system."
+SWEP.Purpose      = "A 100% pin-point accurate one shot sniper rifle equipped with a chargeable prototype laser system."
 SWEP.Instructions = "Open console and type: bind KEY masr_toggle_laser\nActive laser dynamically ramps base damage from 100 up to 250 over 3 seconds."
 
 SWEP.IsMASR = true 
@@ -41,7 +41,6 @@ function SWEP:Initialize()
     self:SetClip1(self.Primary.ClipSize)
 end
 
--- FIXED: Moved skin loading to Deploy so it has a valid owner
 function SWEP:Deploy()
     self:SetHoldType(self.HoldType)
     
@@ -90,7 +89,6 @@ if SERVER then
         end
     end)
 
-    -- Handle skin saving
     net.Receive("MASR_SetSkin", function(len, ply)
         local skinID = net.ReadInt(16)
         ply:SetPData("MASR_Skin", skinID)
@@ -284,8 +282,11 @@ if CLIENT then
 
     hook.Add("PopulateToolMenu", "MASR_Menu", function()
         spawnmenu.AddToolMenuOption("Options", "MASR", "MASR_Settings", "Sniper Settings", "", "", function(panel)
-            panel:Help("Configure your personal weapon skin.")
+            panel:Help("Configure your personal weapon settings.")
+            
             local slider = panel:NumSlider("Skin ID", "masr_skin_id", 0, 10, 0)
+            panel:CheckBox("Use Imperial Units (Feet)", "masr_use_feet")
+            
             local button = panel:Button("Save Favorite Skin")
             button.DoClick = function()
                 local val = math.floor(GetConVar("masr_skin_id"):GetInt())
@@ -297,6 +298,7 @@ if CLIENT then
         end)
     end)
     CreateClientConVar("masr_skin_id", 0, true, false)
+    CreateClientConVar("masr_use_feet", 0, true, false)
 
     hook.Add("PostDrawTranslucentRenderables", "MASR_GlobalLaserSystem", function()
         for _, ply in ipairs(player.GetAll()) do
@@ -335,13 +337,35 @@ if CLIENT then
         local wep = ply:GetActiveWeapon()
         if not IsValid(wep) or not wep.IsMASR then return end
         
-        local isCycling = wep:GetNextPrimaryFire() > CurTime()
+        -- ==========================================
+        -- STATUS & TACTILE RELOAD FLASHING LOGIC
+        -- ==========================================
+        local timeLeft = wep:GetNextPrimaryFire() - CurTime()
         local status = "ROUND LOADED"
         local statusColor = Color(0, 255, 100)
         
-        if isCycling then
-            status = "CYCLING BOLT..."
-            statusColor = Color(255, 200, 0)
+        if timeLeft > 0 then
+            if timeLeft > 2.0 then
+                -- Phase 1: Just fired, chamber is empty (0.5s)
+                status = "CHAMBER EMPTY"
+                if math.floor(CurTime() * 8) % 2 == 0 then
+                    statusColor = Color(255, 50, 50)
+                else
+                    statusColor = Color(100, 20, 20)
+                end
+            elseif timeLeft > 1.4 then
+                -- Phase 2: Cycle bolt back to eject (0.6s)
+                status = "CYCLING BOLT..."
+                statusColor = Color(255, 200, 0)
+            elseif timeLeft > 0.7 then
+                -- Phase 3: Loading the new round (0.7s)
+                status = "ROUND LOADED"
+                statusColor = Color(255, 150, 0) -- Orange
+            else
+                -- Phase 4: Cycle bolt forward to chamber (0.7s)
+                status = "CYCLING BOLT..."
+                statusColor = Color(255, 200, 0)
+            end
         elseif wep:Clip1() <= 0 then
             status = "CHAMBER EMPTY"
             statusColor = Color(255, 50, 50)
@@ -371,8 +395,16 @@ if CLIENT then
                     endpos = ply:GetShootPos() + ply:GetAimVector() * 15000,
                     filter = ply
                 })
-                local distMeters = math.Round(trace.Fraction * 15000 * 0.01905, 1)
-                rangeText = "DISTANCE: " .. distMeters .. "m"
+                
+                local rawDist = trace.Fraction * 15000
+                if GetConVar("masr_use_feet"):GetBool() then
+                    local distFeet = math.Round(rawDist * 0.0625, 1)
+                    rangeText = "DISTANCE: " .. distFeet .. "ft"
+                else
+                    local distMeters = math.Round(rawDist * 0.01905, 1)
+                    rangeText = "DISTANCE: " .. distMeters .. "m"
+                end
+                
                 rangeColor = Color(0, 200, 255)
             end
         end
