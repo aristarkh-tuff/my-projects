@@ -1,6 +1,7 @@
 -- masr_npc_scare.lua
 -- Fixed: Removed the crashing SetTarget line. 
 -- Uses ClearEnemy() which is the safe, native way to stop the "staring."
+-- Added: Friendly NPC disposition check so allies don't betray you.
 
 timer.Create("MASR_NPCS_Scare_Logic", 0.5, 0, function()
     for _, ply in ipairs(player.GetAll()) do
@@ -21,6 +22,10 @@ timer.Create("MASR_NPCS_Scare_Logic", 0.5, 0, function()
 
         for _, npc in ipairs(ents.FindByClass("npc_*")) do
             if not IsValid(npc) or npc:Health() <= 0 or not npc:IsNPC() then continue end
+
+            -- NEW SAFETY CHECK: Ignore friendly NPCs (D_LI means "Like")
+            -- This prevents allies from treating you as a hostile threat.
+            if npc.Disposition and npc:Disposition(ply) == D_LI then continue end
 
             -- Distance check
             if npc:GetPos():DistToSqr(laserHitPos) > 1000000 then continue end 
@@ -45,7 +50,6 @@ timer.Create("MASR_NPCS_Scare_Logic", 0.5, 0, function()
                 
                 -- 2. BREAK THE STARE (Safely)
                 -- ClearEnemy() tells the NPC to drop their current threat.
-                -- We removed SetTarget(NULL) because it was causing the crash.
                 if npc.ClearEnemy then npc:ClearEnemy() end
                 
                 -- 3. Clear current brain state
