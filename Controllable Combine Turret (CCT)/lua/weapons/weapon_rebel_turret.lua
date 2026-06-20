@@ -1,11 +1,11 @@
 AddCSLuaFile()
 
-SWEP.PrintName = "Remote Combine Turret"
-SWEP.Author = "Aristarkh"
-SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. R: Explode. E: Pick up."
+SWEP.PrintName = "Rebel Turret Remote"
+SWEP.Author = "Gemini"
+SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. ALT: 3rd Person. R: Explode. E: Pick up."
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
-SWEP.Category = "Half-Life 2"
+SWEP.Category = "Other"
 
 SWEP.ViewModel = ""
 SWEP.WorldModel = ""
@@ -139,9 +139,8 @@ function SWEP:Think()
         end
 
         -- SQUARE PICKUP TRIGGER
-        -- Follows the turret because it uses current turret position
         local tPos = turret:GetPos()
-        local size = 45 -- 45 units in all directions
+        local size = 45 
         local entities = ents.FindInBox(tPos + Vector(-size, -size, 0), tPos + Vector(size, size, 60))
 
         for _, ent in pairs(entities) do
@@ -163,6 +162,7 @@ function SWEP:Think()
             return
         end
 
+        -- Control Logic
         if self:GetIsControlling() then
             local targetAng = ply:EyeAngles()
             
@@ -176,9 +176,10 @@ function SWEP:Think()
                     local attach = turret:GetAttachment(muzzleID)
                     local shootPos = attach and attach.Pos or turret:GetPos() + Vector(0,0,45)
 
+                    -- FIXED TRACER: Using "Tracer" instead of "AR2Tracer" for better MP compatibility
                     turret:FireBullets({
                         Attacker = ply, Damage = 3, Force = 1, Distance = 4000,
-                        Num = 1, Tracer = 1, TracerName = "AR2Tracer",
+                        Num = 1, Tracer = 1, TracerName = "Tracer", 
                         Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0)
                     })
                     
