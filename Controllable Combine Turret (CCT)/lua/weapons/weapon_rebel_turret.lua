@@ -3,7 +3,7 @@ AddCSLuaFile()
 SWEP.PrintName = "Rebel Turret Remote"
 SWEP.Author = "Aristarkh"
 SWEP.Description = "Heavily inspired by the Manhack controll addon thingy."
-SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. R: Explode. E: Pick up. i reccomend using it in singleplayer cuz the bulletholes dont show up in multiplayer nor tracings for some reason."
+SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. R: Explode. E: Pick up."
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
 SWEP.Category = "Half-Life 2"
