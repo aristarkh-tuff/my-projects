@@ -2,8 +2,7 @@ AddCSLuaFile()
 
 SWEP.PrintName = "Rebel Turret Remote"
 SWEP.Author = "Aristarkh"
-SWEP.Description = "Heavily inspired by the Manhack controll addon thingy."
-SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. ALT: 3rd Person. R: Explode. E: Pick up."
+SWEP.Description = "LMB: Spawn/Shoot. RMB: Control. Zoom Key: Cycle Zoom (Off/35). E: Toggle Mode/Pickup. Hold R: Explode."
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
 SWEP.Category = "Half-Life 2"
@@ -22,18 +21,49 @@ SWEP.Secondary.DefaultClip = -1
 SWEP.Secondary.Automatic = false
 SWEP.Secondary.Ammo = "none"
 
-function SWEP:SetupDataTables()
-    self:NetworkVar("Entity", 0, "ActiveTurret")
-    self:NetworkVar("Bool", 0, "IsControlling")
-    self:NetworkVar("Bool", 1, "ThirdPerson")
-end
-
 function SWEP:Initialize()
     self:SetHoldType("normal")
     self.NextMessage = 0
+    self.NextRangeWarning = 0 
+end
+
+-- Networking Wrappers
+function SWEP:GetPrecisionMode() return self:GetNWBool("PrecisionMode", false) end
+function SWEP:SetPrecisionMode(val) self:SetNWBool("PrecisionMode", val) end
+function SWEP:GetZoomLevel() return self:GetNWInt("ZoomLevel", 0) end
+function SWEP:SetZoomLevel(val) self:SetNWInt("ZoomLevel", val) end
+function SWEP:GetIsControlling() return self:GetNWBool("IsControlling", false) end
+function SWEP:SetIsControlling(val) self:SetNWBool("IsControlling", val) end
+function SWEP:SetActiveTurret(ent) self:SetNWEntity("ActiveTurret", ent) end
+function SWEP:GetActiveTurret() return self:GetNWEntity("ActiveTurret", NULL) end
+
+function SWEP:PerformSelfDestruct()
+    local turret = self:GetActiveTurret()
+    if not IsValid(turret) or not SERVER or turret.IsSelfDestructing then return end
+
+    turret.IsSelfDestructing = true
+    self:SetIsControlling(false)
+    turret:SetMoveType(MOVETYPE_VPHYSICS)
+    self:SetActiveTurret(NULL)
+    
+    turret:EmitSound("npc/turret_floor/panic1.wav", 100, 100)
+    if IsValid(self:GetOwner()) then
+        self:GetOwner():ChatPrint("Self-Destruct in 2 seconds!")
+    end
+
+    timer.Simple(2, function()
+        if IsValid(turret) then
+            local effectdata = EffectData()
+            effectdata:SetOrigin(turret:GetPos())
+            util.Effect("Explosion", effectdata)
+            util.BlastDamage(turret, self:GetOwner() or turret, turret:GetPos(), 200, 150)
+            turret:Remove()
+        end
+    end)
 end
 
 function SWEP:PrimaryAttack()
+    if not IsValid(self:GetOwner()) then return end
     if self:GetIsControlling() then return end
     if not IsFirstTimePredicted() then return end
     
@@ -42,6 +72,8 @@ function SWEP:PrimaryAttack()
     if SERVER then
         local turret = self:GetActiveTurret()
         if IsValid(turret) then
+            if turret.IsSelfDestructing then return end
+            
             if CurTime() > (self.NextMessage or 0) then
                 ply:ChatPrint("Turret already deployed. Press RMB to control.")
                 self.NextMessage = CurTime() + 2
@@ -50,6 +82,15 @@ function SWEP:PrimaryAttack()
         end
 
         local tr = ply:GetEyeTrace()
+        
+        if ply:GetPos():Distance(tr.HitPos) > 200 then
+            if CurTime() > (self.NextRangeWarning or 0) then
+                ply:ChatPrint("Too far! Get within 200 units to deploy.")
+                self.NextRangeWarning = CurTime() + 1.5
+            end
+            return
+        end
+
         local newTurret = ents.Create("npc_turret_floor")
         if not IsValid(newTurret) then return end
 
@@ -73,10 +114,12 @@ function SWEP:PrimaryAttack()
         newTurret.IsSelfDestructing = false
 
         self:SetActiveTurret(newTurret)
+        self:SetPrecisionMode(false)
     end
 end
 
 function SWEP:SecondaryAttack()
+    if not IsValid(self:GetOwner()) then return end
     if not IsFirstTimePredicted() then return end
     local turret = self:GetActiveTurret()
     if not IsValid(turret) or turret.IsSelfDestructing then return end
@@ -89,41 +132,34 @@ function SWEP:SecondaryAttack()
             turret:SetMoveType(MOVETYPE_NONE) 
         else
             turret:SetMoveType(MOVETYPE_VPHYSICS)
+            self:SetZoomLevel(0) -- Reset zoom
         end
     end
 end
 
-function SWEP:Reload()
-    local turret = self:GetActiveTurret()
-    if not IsValid(turret) or not SERVER or turret.IsSelfDestructing then return end
-
-    turret.IsSelfDestructing = true
-    self:SetIsControlling(false)
-    turret:SetMoveType(MOVETYPE_VPHYSICS)
-    self:SetActiveTurret(NULL)
-    
-    turret:EmitSound("npc/turret_floor/panic1.wav", 100, 100)
-    self:GetOwner():ChatPrint("Self-Destruct in 2 seconds!")
-
-    timer.Simple(2, function()
-        if IsValid(turret) then
-            local effectdata = EffectData()
-            effectdata:SetOrigin(turret:GetPos())
-            util.Effect("Explosion", effectdata)
-            util.BlastDamage(turret, self:GetOwner(), turret:GetPos(), 200, 150)
-            turret:Remove()
-        end
-    end)
-end
+function SWEP:Reload() end
 
 function SWEP:Think()
     local ply = self:GetOwner()
+    if not IsValid(ply) then return end
+
+    if ply:KeyDown(IN_RELOAD) then
+        if not self.ReloadHoldStart then
+            self.ReloadHoldStart = CurTime()
+        elseif CurTime() - self.ReloadHoldStart >= 1.0 then
+            self:PerformSelfDestruct()
+            self.ReloadHoldStart = nil
+        end
+    else
+        self.ReloadHoldStart = nil
+    end
+
     local turret = self:GetActiveTurret()
 
-    -- FIXED 3RD PERSON TOGGLE (ALT KEY): Properly predicted and synced
-    if IsFirstTimePredicted() and ply:KeyPressed(IN_WALK) then
-        self:SetThirdPerson(not self:GetThirdPerson())
-        if CLIENT then surface.PlaySound("UI/buttonclick.wav") end
+    -- ADJUSTED: Cycle Zoom: 0 -> 1 -> 0 (Max 35 FOV)
+    if IsFirstTimePredicted() and ply:KeyPressed(IN_ZOOM) and self:GetIsControlling() then
+        local nextLevel = (self:GetZoomLevel() + 1) % 2
+        self:SetZoomLevel(nextLevel)
     end
 
     if not IsValid(turret) then 
@@ -134,20 +170,19 @@ function SWEP:Think()
         return 
     end
 
-    if SERVER and not turret.IsSelfDestructing then
-        -- Ammo Regeneration
+    if turret.IsSelfDestructing then return end
+
+    if SERVER then
         if CurTime() > (turret.NextAmmoRegen or 0) then
             turret:SetNWInt("TurretAmmo", math.Clamp(turret:GetNWInt("TurretAmmo") + 2, 0, 650))
             turret.NextAmmoRegen = CurTime() + 1
         end
 
-        -- PASSIVE HEAT COOLDOWN
         local heat = turret:GetNWFloat("TurretHeat")
         if heat > 0 then 
             turret:SetNWFloat("TurretHeat", math.Clamp(heat - (FrameTime() * 10), 0, 100)) 
         end
 
-        -- AR2 & AR2 LARGE AMMO PICKUP
         for _, ent in pairs(ents.FindInSphere(turret:GetPos(), 60)) do
             local class = ent:GetClass()
             if class == "item_ammo_ar2" or class == "item_ammo_ar2_large" then
@@ -162,40 +197,50 @@ function SWEP:Think()
             end
         end
 
-        if ply:KeyPressed(IN_USE) and ply:GetEyeTrace().Entity == turret and ply:GetPos():Distance(turret:GetPos()) < 100 then
-            turret:Remove()
-            self:SetActiveTurret(NULL)
-            self:SetIsControlling(false)
-            return
+        if self:GetIsControlling() and ply:KeyPressed(IN_USE) then
+            if ply:GetEyeTrace().Entity == turret and ply:GetPos():Distance(turret:GetPos()) < 100 then
+                turret:Remove()
+                self:SetActiveTurret(NULL)
+                self:SetIsControlling(false)
+            else
+                local newState = not self:GetPrecisionMode()
+                self:SetPrecisionMode(newState)
+                ply:EmitSound("buttons/button14.wav", 75, 100)
+            end
         end
 
-        -- Control Logic
         if self:GetIsControlling() then
             local targetAng = ply:EyeAngles()
-            
             turret:SetAngles(Angle(0, targetAng.y, 0))
             turret:SetPoseParameter("aim_pitch", math.Clamp(targetAng.p, -45, 45))
             turret:SetPoseParameter("aim_yaw", 0) 
+
+            local isPrecision = self:GetPrecisionMode()
+            local fireDelay = isPrecision and 0.2 or 0.1
+            -- Balanced 95% accuracy spread
+            local currentSpread = isPrecision and Vector(0.005, 0.005, 0) or Vector(0.08, 0.08, 0)
 
             if ply:KeyDown(IN_ATTACK) and turret:GetNWInt("TurretAmmo") > 0 then
                 if CurTime() > turret.NextShootTime then
                     local muzzleID = turret:LookupAttachment("muzzle")
                     local attach = turret:GetAttachment(muzzleID)
-                    local shootPos = attach and attach.Pos or turret:GetPos() + Vector(0,0,45)
+                    local shootPos = (attach and attach.Pos or turret:GetPos() + Vector(0,0,45)) + Vector(0,0,8)
 
                     turret:FireBullets({
                         Attacker = ply, Damage = 3, Force = 1, Distance = 4000,
                         Num = 1, Tracer = 1, TracerName = "AR2Tracer", 
-                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0),
+                        Src = shootPos, Dir = targetAng:Forward(), Spread = currentSpread,
                         Callback = function(att, tr, dmg)
                             if SERVER then
+                                if tr.HitGroup == HITGROUP_HEAD then
+                                    local rng = math.random(1, 100)
+                                    if rng <= 40 then dmg:SetDamage(20) elseif rng <= 80 then dmg:SetDamage(10) end
+                                end
                                 util.Decal("Impact.Bullet", tr.HitPos + tr.HitNormal, tr.HitPos - tr.HitNormal)
                                 local effectdata = EffectData()
                                 effectdata:SetOrigin(tr.HitPos)
                                 effectdata:SetNormal(tr.HitNormal)
                                 util.Effect("Impact", effectdata)
-
-                                -- NPC AGGRO LOGIC: Make hit NPCs hate the turret
                                 if IsValid(tr.Entity) and tr.Entity:IsNPC() then
                                     tr.Entity:AddEntityRelationship(turret, D_HT, 99)
                                     tr.Entity:UpdateEnemyMemory(turret, tr.HitPos)
@@ -208,10 +253,9 @@ function SWEP:Think()
                     
                     local soundPath = (math.random(1, 2) == 1) and "npc/turret_floor/shoot1.wav" or "npc/turret_floor/shoot2.wav"
                     turret:EmitSound(soundPath, 80, 100)
-                    
                     turret:SetNWInt("TurretAmmo", turret:GetNWInt("TurretAmmo") - 1)
                     turret:SetNWFloat("TurretHeat", math.Clamp(turret:GetNWFloat("TurretHeat") + 2, 0, 100))
-                    turret.NextShootTime = CurTime() + 0.1
+                    turret.NextShootTime = CurTime() + fireDelay
                 end
             end
         end
@@ -219,9 +263,31 @@ function SWEP:Think()
 end
 
 if CLIENT then
-    hook.Add("CalcView", "RebelTurretCamera", function(ply, pos, ang, fov)
+    -- SENSITIVITY HOOK: Proportional scaling for 35 FOV
+    hook.Add("CreateMove", "RebelTurretSensitivity", function(cmd)
+        local ply = LocalPlayer()
         local wep = ply:GetActiveWeapon()
         if not IsValid(wep) or wep:GetClass() ~= "weapon_rebel_turret" or not wep.GetIsControlling or not wep:GetIsControlling() then return end
+
+        local defaultFOV = ply:GetFOV()
+        local currentFOV = wep.CurrentFOV or defaultFOV
+
+        if currentFOV < defaultFOV then
+            local fovRatio = currentFOV / defaultFOV
+            -- Proportional multiplier with a smooth response curve
+            local mult = math.Clamp(math.pow(fovRatio, 1.2), 0.1, 1.0)
+            
+            cmd:SetMouseX(cmd:GetMouseX() * mult)
+            cmd:SetMouseY(cmd:GetMouseY() * mult)
+        end
+    end)
+
+    hook.Add("CalcView", "RebelTurretCamera", function(ply, pos, ang, fov)
+        local wep = ply:GetActiveWeapon()
+        if not IsValid(wep) or wep:GetClass() ~= "weapon_rebel_turret" or not wep.GetIsControlling or not wep:GetIsControlling() then 
+            wep.CurrentFOV = nil 
+            return 
+        end
 
         local turret = wep:GetActiveTurret()
         if IsValid(turret) then
@@ -229,29 +295,19 @@ if CLIENT then
             local attach = turret:GetAttachment(muzzleID)
             local tPos = attach and attach.Pos or (turret:GetPos() + turret:GetUp() * 45)
 
+            if not wep.CurrentFOV then wep.CurrentFOV = fov end
+
+            -- ADJUSTED: Target zoom is now explicitly capped at 35 FOV
+            local level = wep:GetZoomLevel()
+            local targetFOV = (level == 1 and 35) or fov
+            
+            wep.CurrentFOV = Lerp(FrameTime() * 10, wep.CurrentFOV, targetFOV)
+
             local view = {}
             view.angles = ply:EyeAngles()
-            view.fov = fov
+            view.fov = wep.CurrentFOV
             view.drawviewer = true
-
-            if wep:GetThirdPerson() then
-                -- 3RD PERSON CAMERA: Backs away based on view angle
-                local camDir = ply:GetAimVector()
-                local camDest = tPos - (camDir * 70) + Vector(0, 0, 20)
-                
-                -- Anti-wall clip trace
-                local tr = util.TraceLine({
-                    start = tPos,
-                    endpos = camDest,
-                    filter = {ply, turret}
-                })
-                
-                -- Put camera slightly in front of wall if we hit one
-                view.origin = tr.HitPos + (camDir * 5)
-            else
-                -- 1ST PERSON CAMERA: Forward over barrel
-                view.origin = tPos + (turret:GetForward() * 12) + (turret:GetUp() * 8)
-            end
+            view.origin = tPos + (turret:GetForward() * 12) + (turret:GetUp() * 8)
             
             return view
         end
@@ -266,19 +322,24 @@ if CLIENT then
         local x, y = scrW - 320, scrH - 140
 
         surface.SetDrawColor(0, 0, 0, 200)
-        surface.DrawRect(x, y, 300, 120)
+        surface.DrawRect(x, y, 300, 140)
         surface.SetDrawColor(255, 165, 0, 255)
-        surface.DrawOutlinedRect(x, y, 300, 120)
+        surface.DrawOutlinedRect(x, y, 300, 140)
+
+        local isPrecision = self:GetPrecisionMode()
+        local modeText = isPrecision and "PRECISION" or "RAPID"
+        local modeColor = isPrecision and Color(0, 255, 0) or Color(255, 165, 0)
 
         draw.SimpleText("STATUS: LINKED", "Trebuchet24", x + 10, y + 10, Color(255, 165, 0))
-        draw.SimpleText("HEALTH: " .. turret:Health(), "Trebuchet24", x + 10, y + 40, Color(255, 165, 0))
-        draw.SimpleText("AMMO: " .. turret:GetNWInt("TurretAmmo") .. " / 650", "Trebuchet24", x + 10, y + 65, Color(255, 165, 0))
+        draw.SimpleText("MODE: " .. modeText, "Trebuchet24", x + 10, y + 35, modeColor)
+        draw.SimpleText("HEALTH: " .. turret:Health(), "Trebuchet24", x + 10, y + 60, Color(255, 165, 0))
+        draw.SimpleText("AMMO: " .. turret:GetNWInt("TurretAmmo") .. " / 650", "Trebuchet24", x + 10, y + 85, Color(255, 165, 0))
         
-        draw.SimpleText("HEAT:", "Trebuchet18", x + 10, y + 93, Color(255, 165, 0))
+        draw.SimpleText("HEAT:", "Trebuchet18", x + 10, y + 113, Color(255, 165, 0))
         surface.SetDrawColor(50, 50, 50, 255)
-        surface.DrawRect(x + 60, y + 95, 220, 15)
+        surface.DrawRect(x + 60, y + 115, 220, 15)
         surface.SetDrawColor(255, 165, 0, 255)
-        surface.DrawRect(x + 60, y + 95, (turret:GetNWFloat("TurretHeat") / 100) * 220, 15)
+        surface.DrawRect(x + 60, y + 115, (turret:GetNWFloat("TurretHeat") / 100) * 220, 15)
         
         surface.DrawLine(scrW/2 - 10, scrH/2, scrW/2 + 10, scrH/2)
         surface.DrawLine(scrW/2, scrH/2 - 10, scrW/2, scrH/2 + 10)
@@ -290,7 +351,25 @@ if CLIENT then
         })
 
         if IsValid(tr.Entity) and tr.Entity:Health() > 0 then
-            draw.SimpleText("TARGET HEALTH: " .. tr.Entity:Health(), "Trebuchet24", scrW/2, scrH/2 + 30, Color(255, 0, 0), TEXT_ALIGN_CENTER)
+            draw.SimpleText("TARGET HP: " .. tr.Entity:Health(), "Trebuchet24", scrW / 2, scrH - 100, Color(255, 50, 50), TEXT_ALIGN_CENTER)
         end
     end
+end
+
+-- ========================================================
+-- PVS FIX: Keeps map props fully rendered while looking 
+-- through the turret view from behind solid geometry.
+-- ========================================================
+if SERVER then
+    hook.Add("SetupPlayerVisibility", "RebelTurretVisibility", function(ply, viewEntity)
+        if not IsValid(ply) then return end
+        
+        local wep = ply:GetActiveWeapon()
+        if IsValid(wep) and wep:GetClass() == "weapon_rebel_turret" and wep.GetIsControlling and wep:GetIsControlling() then
+            local turret = wep:GetActiveTurret()
+            if IsValid(turret) then
+                AddOriginToPVS(turret:GetPos())
+            end
+        end
+    end)
 end
