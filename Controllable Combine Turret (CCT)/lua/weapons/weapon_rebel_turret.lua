@@ -3,7 +3,7 @@ AddCSLuaFile()
 SWEP.PrintName = "Rebel Turret Remote"
 SWEP.Author = "Aristarkh"
 SWEP.Description = "Heavily inspired by the Manhack controll addon thingy."
-SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. R: Explode. E: Pick up."
+SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. ALT: 3rd Person. R: Explode. E: Pick up."
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
 SWEP.Category = "Half-Life 2"
@@ -120,8 +120,10 @@ function SWEP:Think()
     local ply = self:GetOwner()
     local turret = self:GetActiveTurret()
 
-    if CLIENT and ply:KeyPressed(IN_WALK) then
+    -- FIXED 3RD PERSON TOGGLE (ALT KEY): Properly predicted and synced
+    if IsFirstTimePredicted() and ply:KeyPressed(IN_WALK) then
         self:SetThirdPerson(not self:GetThirdPerson())
+        if CLIENT then surface.PlaySound("UI/buttonclick.wav") end
     end
 
     if not IsValid(turret) then 
@@ -139,16 +141,20 @@ function SWEP:Think()
             turret.NextAmmoRegen = CurTime() + 1
         end
 
-        -- SQUARE PICKUP TRIGGER
-        local tPos = turret:GetPos()
-        local size = 45 
-        local entities = ents.FindInBox(tPos + Vector(-size, -size, 0), tPos + Vector(size, size, 60))
+        -- PASSIVE HEAT COOLDOWN
+        local heat = turret:GetNWFloat("TurretHeat")
+        if heat > 0 then 
+            turret:SetNWFloat("TurretHeat", math.Clamp(heat - (FrameTime() * 10), 0, 100)) 
+        end
 
-        for _, ent in pairs(entities) do
-            if ent:GetClass() == "item_ammo_ar2" then
+        -- AR2 & AR2 LARGE AMMO PICKUP
+        for _, ent in pairs(ents.FindInSphere(turret:GetPos(), 60)) do
+            local class = ent:GetClass()
+            if class == "item_ammo_ar2" or class == "item_ammo_ar2_large" then
                 local current = turret:GetNWInt("TurretAmmo")
                 if current < 650 then
-                    turret:SetNWInt("TurretAmmo", math.Clamp(current + 100, 0, 650))
+                    local addAmmo = (class == "item_ammo_ar2_large") and 100 or 30
+                    turret:SetNWInt("TurretAmmo", math.Clamp(current + addAmmo, 0, 650))
                     ent:EmitSound("items/ammo_pickup.wav")
                     turret:EmitSound("items/ammo_pickup.wav", 75, 100)
                     ent:Remove()
@@ -177,11 +183,27 @@ function SWEP:Think()
                     local attach = turret:GetAttachment(muzzleID)
                     local shootPos = attach and attach.Pos or turret:GetPos() + Vector(0,0,45)
 
-                    -- FIXED TRACER: Using "Tracer" instead of "AR2Tracer" for better MP compatibility
                     turret:FireBullets({
                         Attacker = ply, Damage = 3, Force = 1, Distance = 4000,
-                        Num = 1, Tracer = 1, TracerName = "Tracer", 
-                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0)
+                        Num = 1, Tracer = 1, TracerName = "AR2Tracer", 
+                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0),
+                        Callback = function(att, tr, dmg)
+                            if SERVER then
+                                util.Decal("Impact.Bullet", tr.HitPos + tr.HitNormal, tr.HitPos - tr.HitNormal)
+                                local effectdata = EffectData()
+                                effectdata:SetOrigin(tr.HitPos)
+                                effectdata:SetNormal(tr.HitNormal)
+                                util.Effect("Impact", effectdata)
+
+                                -- NPC AGGRO LOGIC: Make hit NPCs hate the turret
+                                if IsValid(tr.Entity) and tr.Entity:IsNPC() then
+                                    tr.Entity:AddEntityRelationship(turret, D_HT, 99)
+                                    tr.Entity:UpdateEnemyMemory(turret, tr.HitPos)
+                                    if tr.Entity.SetEnemy then tr.Entity:SetEnemy(turret) end
+                                    if tr.Entity.SetTarget then tr.Entity:SetTarget(turret) end
+                                end
+                            end
+                        end
                     })
                     
                     local soundPath = (math.random(1, 2) == 1) and "npc/turret_floor/shoot1.wav" or "npc/turret_floor/shoot2.wav"
@@ -192,24 +214,11 @@ function SWEP:Think()
                     turret.NextShootTime = CurTime() + 0.1
                 end
             end
-            local heat = turret:GetNWFloat("TurretHeat")
-            if heat > 0 then turret:SetNWFloat("TurretHeat", math.Clamp(heat - (FrameTime() * 10), 0, 100)) end
         end
     end
 end
 
 if CLIENT then
-    hook.Add("Think", "RebelTurretLocalVisibility", function()
-        local ply = LocalPlayer()
-        local wep = ply:GetActiveWeapon()
-        if not IsValid(wep) or wep:GetClass() ~= "weapon_rebel_turret" or not wep.GetIsControlling then return end
-        
-        local turret = wep:GetActiveTurret()
-        if IsValid(turret) then
-            turret:SetNoDraw(wep:GetIsControlling() and not wep:GetThirdPerson())
-        end
-    end)
-
     hook.Add("CalcView", "RebelTurretCamera", function(ply, pos, ang, fov)
         local wep = ply:GetActiveWeapon()
         if not IsValid(wep) or wep:GetClass() ~= "weapon_rebel_turret" or not wep.GetIsControlling or not wep:GetIsControlling() then return end
@@ -221,14 +230,29 @@ if CLIENT then
             local tPos = attach and attach.Pos or (turret:GetPos() + turret:GetUp() * 45)
 
             local view = {}
-            if wep:GetThirdPerson() then
-                view.origin = tPos - (turret:GetForward() * 60) + (turret:GetUp() * 20)
-            else
-                view.origin = tPos
-            end
             view.angles = ply:EyeAngles()
             view.fov = fov
             view.drawviewer = true
+
+            if wep:GetThirdPerson() then
+                -- 3RD PERSON CAMERA: Backs away based on view angle
+                local camDir = ply:GetAimVector()
+                local camDest = tPos - (camDir * 70) + Vector(0, 0, 20)
+                
+                -- Anti-wall clip trace
+                local tr = util.TraceLine({
+                    start = tPos,
+                    endpos = camDest,
+                    filter = {ply, turret}
+                })
+                
+                -- Put camera slightly in front of wall if we hit one
+                view.origin = tr.HitPos + (camDir * 5)
+            else
+                -- 1ST PERSON CAMERA: Forward over barrel
+                view.origin = tPos + (turret:GetForward() * 12) + (turret:GetUp() * 8)
+            end
+            
             return view
         end
     end)
