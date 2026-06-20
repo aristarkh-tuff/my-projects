@@ -1,8 +1,8 @@
 AddCSLuaFile()
 
 SWEP.PrintName = "Rebel Turret Remote"
-SWEP.Author = "Aristarkg"
-SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. ALT: 3rd Person. R: Explode. E: Pick up."
+SWEP.Author = "Aristarkh"
+SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. R: Explode. E: Pick up. i reccomend using it in singleplayer cuz the bulletholes dont show up in multiplayer nor tracings for some reason."
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
 SWEP.Category = "Half-life 2"
@@ -138,8 +138,12 @@ function SWEP:Think()
             turret.NextAmmoRegen = CurTime() + 1
         end
 
-        -- RELIABLE PICKUP LOGIC (Using Sphere for Multiplayer)
-        for _, ent in pairs(ents.FindInSphere(turret:GetPos(), 60)) do
+        -- SQUARE PICKUP TRIGGER
+        local tPos = turret:GetPos()
+        local size = 45 
+        local entities = ents.FindInBox(tPos + Vector(-size, -size, 0), tPos + Vector(size, size, 60))
+
+        for _, ent in pairs(entities) do
             if ent:GetClass() == "item_ammo_ar2" then
                 local current = turret:GetNWInt("TurretAmmo")
                 if current < 650 then
@@ -172,19 +176,11 @@ function SWEP:Think()
                     local attach = turret:GetAttachment(muzzleID)
                     local shootPos = attach and attach.Pos or turret:GetPos() + Vector(0,0,45)
 
+                    -- FIXED TRACER: Using "Tracer" instead of "AR2Tracer" for better MP compatibility
                     turret:FireBullets({
                         Attacker = ply, Damage = 3, Force = 1, Distance = 4000,
-                        Num = 1, Tracer = 1, TracerName = "AR2Tracer",
-                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0),
-                        Callback = function(att, tr, dmg)
-                            if SERVER then
-                                util.Decal("Impact.Bullet", tr.HitPos + tr.HitNormal, tr.HitPos - tr.HitNormal)
-                                local effectdata = EffectData()
-                                effectdata:SetOrigin(tr.HitPos)
-                                effectdata:SetNormal(tr.HitNormal)
-                                util.Effect("Impact", effectdata)
-                            end
-                        end
+                        Num = 1, Tracer = 1, TracerName = "Tracer", 
+                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0)
                     })
                     
                     local soundPath = (math.random(1, 2) == 1) and "npc/turret_floor/shoot1.wav" or "npc/turret_floor/shoot2.wav"
@@ -202,6 +198,17 @@ function SWEP:Think()
 end
 
 if CLIENT then
+    hook.Add("Think", "RebelTurretLocalVisibility", function()
+        local ply = LocalPlayer()
+        local wep = ply:GetActiveWeapon()
+        if not IsValid(wep) or wep:GetClass() ~= "weapon_rebel_turret" or not wep.GetIsControlling then return end
+        
+        local turret = wep:GetActiveTurret()
+        if IsValid(turret) then
+            turret:SetNoDraw(wep:GetIsControlling() and not wep:GetThirdPerson())
+        end
+    end)
+
     hook.Add("CalcView", "RebelTurretCamera", function(ply, pos, ang, fov)
         local wep = ply:GetActiveWeapon()
         if not IsValid(wep) or wep:GetClass() ~= "weapon_rebel_turret" or not wep.GetIsControlling or not wep:GetIsControlling() then return end
