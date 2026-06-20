@@ -1,11 +1,11 @@
 AddCSLuaFile()
 
 SWEP.PrintName = "Rebel Turret Remote"
-SWEP.Author = "Gemini"
-SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. ALT: 3rd Person. R: Explode. E: Pick up."
+SWEP.Author = "Aristarkh"
+SWEP.Instructions = "LMB: Spawn/Shoot. RMB: Control. R: Explode. E: Pick up."
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
-SWEP.Category = "Other"
+SWEP.Category = "Half-Life 2"
 
 SWEP.ViewModel = ""
 SWEP.WorldModel = ""
@@ -176,11 +176,22 @@ function SWEP:Think()
                     local attach = turret:GetAttachment(muzzleID)
                     local shootPos = attach and attach.Pos or turret:GetPos() + Vector(0,0,45)
 
-                    -- FIXED TRACER: Using "Tracer" instead of "AR2Tracer" for better MP compatibility
+                    -- FORCE VISUAL EFFECTS IN MULTIPLAYER
                     turret:FireBullets({
                         Attacker = ply, Damage = 3, Force = 1, Distance = 4000,
-                        Num = 1, Tracer = 1, TracerName = "Tracer", 
-                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0)
+                        Num = 1, Tracer = 1, TracerName = "AR2Tracer",
+                        Src = shootPos, Dir = targetAng:Forward(), Spread = Vector(0.08, 0.08, 0),
+                        Callback = function(att, tr, dmg)
+                            if SERVER then
+                                -- Force Impact Decal
+                                util.Decal("Impact.Bullet", tr.HitPos + tr.HitNormal, tr.HitPos - tr.HitNormal)
+                                -- Force Spark/Dust effect
+                                local effectdata = EffectData()
+                                effectdata:SetOrigin(tr.HitPos)
+                                effectdata:SetNormal(tr.HitNormal)
+                                util.Effect("Impact", effectdata)
+                            end
+                        end
                     })
                     
                     local soundPath = (math.random(1, 2) == 1) and "npc/turret_floor/shoot1.wav" or "npc/turret_floor/shoot2.wav"
