@@ -49,7 +49,8 @@ if CLIENT then
 end
 
 function SWEP:Initialize()
-    self:SetWeaponHoldType(self.HoldType)
+    -- FIXED: Changed SetWeaponHoldType to SetHoldType for proper networking
+    self:SetHoldType(self.HoldType)
     self.IsSwinging = false
     self.SwingStartTime = 0
     self.SwingDuration = 0.4
@@ -100,7 +101,6 @@ function SWEP:OnDrop()
 end
 
 -- --- MELEE LOGIC ---
--- FIXED: Always draw the viewmodel so it doesn't vanish when idle
 function SWEP:ShouldDrawViewModel()
     return true
 end
@@ -137,7 +137,6 @@ function SWEP:GetViewModelPosition(pos, ang)
     return pos, ang
 end
 
--- Helper function to force client animation on heavy-addon builds
 function SWEP:TriggerSwingAnimation()
     self.IsSwinging = true
     self.SwingStartTime = CurTime()
@@ -153,7 +152,6 @@ function SWEP:PrimaryAttack()
     if not IsValid(owner) then return end
     owner:SetAnimation(PLAYER_ATTACK1)
     
-    -- FIXED: Forces client to animate even if prediction fails
     self:TriggerSwingAnimation()
     if SERVER then self:CallOnClient("TriggerSwingAnimation") end
 
@@ -236,7 +234,6 @@ function SWEP:MeleeStrike(damage, ragdollChance, fullKOChance)
     end
     
     if SERVER and tr.Hit and IsValid(tr.Entity) then
-        -- GLASS BREAKING LOGIC
         local entClass = tr.Entity:GetClass()
         if entClass == "func_breakable" or entClass == "func_breakable_surf" then
             tr.Entity:Fire("break")
@@ -677,6 +674,7 @@ end
 function SWEP:Deploy()
     self:ApplyGoldMaterial()
     self:ApplyCustomization()
-    self:SetWeaponHoldType(self.HoldType)
+    -- FIXED: Changed SetWeaponHoldType to SetHoldType here as well
+    self:SetHoldType(self.HoldType)
     return true
 end
