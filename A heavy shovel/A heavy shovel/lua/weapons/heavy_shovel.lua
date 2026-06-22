@@ -100,8 +100,9 @@ function SWEP:OnDrop()
 end
 
 -- --- MELEE LOGIC ---
+-- FIXED: Always draw the viewmodel so it doesn't vanish when idle
 function SWEP:ShouldDrawViewModel()
-    return self.IsSwinging or self.ChargeViewActive
+    return true
 end
 
 function SWEP:GetViewModelPosition(pos, ang)
@@ -136,6 +137,12 @@ function SWEP:GetViewModelPosition(pos, ang)
     return pos, ang
 end
 
+-- Helper function to force client animation on heavy-addon builds
+function SWEP:TriggerSwingAnimation()
+    self.IsSwinging = true
+    self.SwingStartTime = CurTime()
+end
+
 function SWEP:PrimaryAttack()
     if self:GetIsCharging() then
         self:SetIsCharging(false)
@@ -145,8 +152,11 @@ function SWEP:PrimaryAttack()
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
     owner:SetAnimation(PLAYER_ATTACK1)
-    self.IsSwinging = true
-    self.SwingStartTime = CurTime()
+    
+    -- FIXED: Forces client to animate even if prediction fails
+    self:TriggerSwingAnimation()
+    if SERVER then self:CallOnClient("TriggerSwingAnimation") end
+
     self:MeleeStrike(10, 0, false)
     self:SetNextPrimaryFire(CurTime() + 0.6)
 end
@@ -190,8 +200,10 @@ function SWEP:Think()
         end
         
         owner:SetAnimation(PLAYER_ATTACK1)
-        self.IsSwinging = true
-        self.SwingStartTime = CurTime()
+        
+        self:TriggerSwingAnimation()
+        if SERVER then self:CallOnClient("TriggerSwingAnimation") end
+
         self:MeleeStrike(calculatedDmg, calculatedChance, fullKOChance)
         self:SetIsCharging(false)
         self:SetNextPrimaryFire(CurTime() + 0.5)
@@ -375,7 +387,6 @@ if SERVER then
                 phys:Wake()
                 local forceDir = owner:GetAimVector()
                 forceDir.z = 0.25
-                -- INCREASED FORCE CALCULATION HERE
                 local forceMagnitude = math.Clamp(800 + (damage * 250), 0, 15000)
                 phys:ApplyForceCenter(forceDir * forceMagnitude + Vector(0, 0, 800))
             end
