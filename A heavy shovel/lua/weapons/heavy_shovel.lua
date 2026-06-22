@@ -5,7 +5,7 @@ if SERVER then
 end
 SWEP.PrintName = "Heavy Shovel"
 SWEP.Author = "Aristarkh"
-SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release"
+SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release, and theres a chance of a 60 sec Knockout"
 SWEP.Category = "Custom Melees"
 
 SWEP.Spawnable = true
