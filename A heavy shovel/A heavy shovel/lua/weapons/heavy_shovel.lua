@@ -3,11 +3,10 @@ AddCSLuaFile()
 if SERVER then
     util.AddNetworkString("ShovelKOEvent")
 end
-
 SWEP.PrintName = "Heavy Shovel"
 SWEP.Author = "Aristarkh"
-SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release | if it turns light blue = 5 percent 1 min knock out| if turns very light blue 50 percent 1 minute knock out"
-SWEP.Category = "Custom Melee"
+SWEP.Instructions = "Left Click: Swing | Right Click: Charge & Release, and theres a chance of a 60 sec Knockout"
+SWEP.Category = "Custom Melees"
 
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -159,6 +158,7 @@ function SWEP:SecondaryAttack()
     self:SetChargeStartTime(CurTime())
     self.ChargeViewActive = true
     self.ChargeViewStartTime = CurTime()
+    self:SetNextSecondaryFire(CurTime() + 0.6)
 end
 
 function SWEP:Think()
@@ -181,27 +181,25 @@ function SWEP:Think()
         
         local isTap = chargeTime < 0.3
         local calculatedDmg = isTap and 5 or 10 + math.Clamp(chargeRatio * 40, 0, 40)
-        local calculatedChance = isTap and 0 or 30 + math.Clamp((chargeTime / 5) * 65, 0, 65)
-        
-        local roll = math.random(1, 100)
-        local isLuckyKO = false
-        
+        local calculatedChance = isTap and 0 or (chargeTime >= 3 and 95 or 30 + math.Clamp((chargeTime / 5) * 65, 0, 65))
+        local fullKOChance = 0
         if chargeRatio >= 1.0 then
-            isLuckyKO = (roll <= math.random(50, 100))
+            fullKOChance = 50
         elseif chargeRatio >= 0.5 then
-            isLuckyKO = (roll <= math.random(25, 50))
+            fullKOChance = 5
         end
         
         owner:SetAnimation(PLAYER_ATTACK1)
         self.IsSwinging = true
         self.SwingStartTime = CurTime()
-        self:MeleeStrike(calculatedDmg, calculatedChance, isLuckyKO)
+        self:MeleeStrike(calculatedDmg, calculatedChance, fullKOChance)
         self:SetIsCharging(false)
         self:SetNextPrimaryFire(CurTime() + 0.5)
+        self:SetNextSecondaryFire(CurTime() + 0.6)
     end
 end
 
-function SWEP:MeleeStrike(damage, ragdollChance, forceFullKO)
+function SWEP:MeleeStrike(damage, ragdollChance, fullKOChance)
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
     owner:LagCompensation(true)
@@ -226,6 +224,12 @@ function SWEP:MeleeStrike(damage, ragdollChance, forceFullKO)
     end
     
     if SERVER and tr.Hit and IsValid(tr.Entity) then
+        -- GLASS BREAKING LOGIC
+        local entClass = tr.Entity:GetClass()
+        if entClass == "func_breakable" or entClass == "func_breakable_surf" then
+            tr.Entity:Fire("break")
+        end
+
         local finalDamage = damage
         if tr.Entity:GetClass():find("headcrab") then finalDamage = math.min(finalDamage, 8) end
 
@@ -243,8 +247,9 @@ function SWEP:MeleeStrike(damage, ragdollChance, forceFullKO)
         end
 
         if tr.Entity:IsNPC() and tr.Entity:Health() > 0 and not tr.Entity.IsRagdolled then
-            if (math.random(1, 100) <= ragdollChance) or forceFullKO then 
-                self:RagdollNPC(tr.Entity, finalDamage, forceFullKO) 
+            if math.random(1, 100) <= ragdollChance then
+                local isFullKO = fullKOChance > 0 and math.random(1, 100) <= fullKOChance
+                self:RagdollNPC(tr.Entity, finalDamage, isFullKO)
             end
         end
     end
@@ -369,8 +374,10 @@ if SERVER then
             if IsValid(phys) then 
                 phys:Wake()
                 local forceDir = owner:GetAimVector()
-                forceDir.z = 0.3
-                phys:ApplyForceCenter(forceDir * (damage * 400) + Vector(0, 0, 1000)) 
+                forceDir.z = 0.25
+                -- INCREASED FORCE CALCULATION HERE
+                local forceMagnitude = math.Clamp(800 + (damage * 250), 0, 15000)
+                phys:ApplyForceCenter(forceDir * forceMagnitude + Vector(0, 0, 800))
             end
         end
 
@@ -395,6 +402,12 @@ if SERVER then
             dmginfo:SetDamageType(DMG_FALL)
             dmginfo:SetDamagePosition(data.HitPos or ent:GetPos())
             npc:TakeDamageInfo(dmginfo)
+
+            local hitPos = data.HitPos or ent:GetPos()
+            local effectdata = EffectData()
+            effectdata:SetOrigin(hitPos)
+            util.Effect("BloodImpact", effectdata)
+            util.Decal("Blood", hitPos + Vector(0,0,1), hitPos - Vector(0,0,1))
         end)
 
         local timerID = "ShovelRagdoll_" .. ragdoll:EntIndex()
@@ -404,13 +417,19 @@ if SERVER then
 
         function ragdoll:OnTakeDamage(dmginfo)
             if self.IsPermanentlyDead then return end
-            
-            local npc = self.AttachedNPC
-            if not IsValid(npc) then return end
+            local dmgType = dmginfo:GetDamageType()
+            local dmgAmt = dmginfo:GetDamage() or 0
 
-            if npc.IsRagdolledByShowel then
+            if bit.band(dmgType, DMG_ALWAYSGIB) ~= 0 or (bit.band(dmgType, DMG_BLAST) ~= 0 and dmgAmt >= 50) then
+                self.IsPermanentlyDead = true
+                if IsValid(self.AttachedNPC) then self.AttachedNPC:Remove() end
+                if IsValid(self) then self:Remove() end
                 return
             end
+
+            local npc = self.AttachedNPC
+            if not IsValid(npc) then return end
+            if npc.IsRagdolledByShowel then return end
             
             local hitPos = dmginfo:GetDamagePosition()
             if not hitPos or hitPos == vector_origin then hitPos = self:GetPos() end
@@ -419,9 +438,7 @@ if SERVER then
             local headBone = self:LookupBone("ValveBiped.Bip01_Head1")
             if headBone then
                 local headPos, _ = self:GetBonePosition(headBone)
-                if headPos:Distance(hitPos) < 15 then
-                    isHeadshot = true
-                end
+                if headPos:Distance(hitPos) < 15 then isHeadshot = true end
             end
 
             local damageType = dmginfo:GetDamageType()
@@ -431,35 +448,20 @@ if SERVER then
             if isBullet and isHeadshot then
                 self.IsPermanentlyDead = true
                 self:EmitSound("physics/body/body_medium_break2.wav", 75, 100)
-                
                 local effectdata = EffectData()
                 effectdata:SetOrigin(hitPos)
                 util.Effect("BloodImpact", effectdata)
-                
                 util.Decal("Blood", hitPos + Vector(0,0,1), hitPos - Vector(0,0,1))
-                
-                if IsValid(npc) then
-                    npc:SetHealth(0)
-                    npc:Remove()
-                end
+                if IsValid(npc) then npc:SetHealth(0) npc:Remove() end
                 return
             end
 
             local impactDamage = dmginfo:GetDamage()
-            if isBullet or isBlunt then
-                impactDamage = math.max(impactDamage, 5)
-            end
-
-            if isHeadshot then
-                impactDamage = impactDamage * 1.25
-            end
+            if isBullet or isBlunt then impactDamage = math.max(impactDamage, 5) end
+            if isHeadshot then impactDamage = impactDamage * 1.25 end
 
             local newHealth = npc:Health() - impactDamage
-            if newHealth < 5 then
-                npc:SetHealth(5)
-            else
-                npc:SetHealth(newHealth)
-            end
+            if newHealth < 5 then npc:SetHealth(5) else npc:SetHealth(newHealth) end
         end
 
         timer.Create(timerID, 0, 0, function()
@@ -485,50 +487,28 @@ if SERVER then
                     timer.Remove(timerID)
                     if IsValid(npc) and IsValid(ragdoll) then
                         npc:RemoveSpawnFlags(65536)
-                        if npc.IsVJBaseNPC then 
-                            npc.DisableSound = false 
-                            npc:SetSoundVolume(1, 4) 
-                        end
-                        
+                        if npc.IsVJBaseNPC then npc.DisableSound = false npc:SetSoundVolume(1, 4) end
                         local faceAway = (npc:GetPos() - owner:GetPos()):Angle()
-                        faceAway.p = 0
-                        faceAway.r = 0
-                        
-                        npc:SetPos(ragdoll:GetPos())
-                        npc:SetAngles(faceAway)
-                        ragdoll:Remove()
-                        npc:SetNoDraw(false)
-                        npc:SetSolid(SOLID_BBOX)
-                        npc:SetMoveType(MOVETYPE_STEP)
-                        npc.IsRagdolled = false
-                        npc.IsRagdolledByShowel = false
+                        faceAway.p = 0 faceAway.r = 0
+                        npc:SetPos(ragdoll:GetPos()) npc:SetAngles(faceAway)
+                        ragdoll:Remove() npc:SetNoDraw(false) npc:SetSolid(SOLID_BBOX) npc:SetMoveType(MOVETYPE_STEP)
+                        npc.IsRagdolled = false npc.IsRagdolledByShowel = false
                         hook.Remove("EntityTakeDamage", "ShovelRagdollNPCDamage_" .. npc:EntIndex())
                         npc:ClearSchedule()
                         if IsValid(owner) then
-                            npc:SetEnemy(owner)
-                            npc:AddEntityRelationship(owner, D_HT, 99)
+                            npc:SetEnemy(owner) npc:AddEntityRelationship(owner, D_HT, 99)
                             if npc.SetNPCState then npc:SetNPCState(NPC_STATE_COMBAT) end
                             if npc.SetSchedule then npc:SetSchedule(SCHED_CHASE_ENEMY) end
-                        elseif npc.SetNPCState then
-                            npc:SetNPCState(NPC_STATE_ALERT)
-                        end
-                        npc:CapabilitiesAdd(CAP_USE_WEAPONS)
-                        npc:Fire("Enable")
-                        npc:Fire("Open")
-                        
+                        elseif npc.SetNPCState then npc:SetNPCState(NPC_STATE_ALERT) end
+                        npc:CapabilitiesAdd(CAP_USE_WEAPONS) npc:Fire("Enable") npc:Fire("Open")
                         timer.Simple(0.5, function()
                             if not IsValid(npc) then return end
                             if IsValid(owner) then
-                                npc:SetEnemy(owner)
-                                npc:AddEntityRelationship(owner, D_HT, 99)
+                                npc:SetEnemy(owner) npc:AddEntityRelationship(owner, D_HT, 99)
                                 if npc.SetNPCState then npc:SetNPCState(NPC_STATE_COMBAT) end
                                 if npc.SetSchedule then npc:SetSchedule(SCHED_CHASE_ENEMY) end
-                            elseif npc.SetNPCState then
-                                npc:SetNPCState(NPC_STATE_ALERT)
-                            end
-                            npc:CapabilitiesAdd(CAP_USE_WEAPONS)
-                            npc:Fire("Enable")
-                            npc:Fire("Open")
+                            elseif npc.SetNPCState then npc:SetNPCState(NPC_STATE_ALERT) end
+                            npc:CapabilitiesAdd(CAP_USE_WEAPONS) npc:Fire("Enable") npc:Fire("Open")
                         end)
                     end
                 end
@@ -539,50 +519,28 @@ if SERVER then
                 timer.Remove(timerID)
                 if IsValid(npc) and IsValid(ragdoll) then
                     npc:RemoveSpawnFlags(65536)
-                    if npc.IsVJBaseNPC then 
-                        npc.DisableSound = false 
-                        npc:SetSoundVolume(1, 4) 
-                    end
-                    
+                    if npc.IsVJBaseNPC then npc.DisableSound = false npc:SetSoundVolume(1, 4) end
                     local faceAway = (npc:GetPos() - owner:GetPos()):Angle()
-                    faceAway.p = 0
-                    faceAway.r = 0
-                    
-                    npc:SetPos(ragdoll:GetPos())
-                    npc:SetAngles(faceAway)
-                    ragdoll:Remove()
-                    npc:SetNoDraw(false)
-                    npc:SetSolid(SOLID_BBOX)
-                    npc:SetMoveType(MOVETYPE_STEP)
-                    npc.IsRagdolled = false
-                    npc.IsRagdolledByShowel = false
+                    faceAway.p = 0 faceAway.r = 0
+                    npc:SetPos(ragdoll:GetPos()) npc:SetAngles(faceAway)
+                    ragdoll:Remove() npc:SetNoDraw(false) npc:SetSolid(SOLID_BBOX) npc:SetMoveType(MOVETYPE_STEP)
+                    npc.IsRagdolled = false npc.IsRagdolledByShowel = false
                     hook.Remove("EntityTakeDamage", "ShovelRagdollNPCDamage_" .. npc:EntIndex())
                     npc:ClearSchedule()
                     if IsValid(owner) then
-                        npc:SetEnemy(owner)
-                        npc:AddEntityRelationship(owner, D_HT, 99)
+                        npc:SetEnemy(owner) npc:AddEntityRelationship(owner, D_HT, 99)
                         if npc.SetNPCState then npc:SetNPCState(NPC_STATE_COMBAT) end
                         if npc.SetSchedule then npc:SetSchedule(SCHED_CHASE_ENEMY) end
-                    elseif npc.SetNPCState then
-                        npc:SetNPCState(NPC_STATE_ALERT)
-                    end
-                    npc:CapabilitiesAdd(CAP_USE_WEAPONS)
-                    npc:Fire("Enable")
-                    npc:Fire("Open")
-                    
+                    elseif npc.SetNPCState then npc:SetNPCState(NPC_STATE_ALERT) end
+                    npc:CapabilitiesAdd(CAP_USE_WEAPONS) npc:Fire("Enable") npc:Fire("Open")
                     timer.Simple(0.5, function()
                         if not IsValid(npc) then return end
                         if IsValid(owner) then
-                            npc:SetEnemy(owner)
-                            npc:AddEntityRelationship(owner, D_HT, 99)
+                            npc:SetEnemy(owner) npc:AddEntityRelationship(owner, D_HT, 99)
                             if npc.SetNPCState then npc:SetNPCState(NPC_STATE_COMBAT) end
                             if npc.SetSchedule then npc:SetSchedule(SCHED_CHASE_ENEMY) end
-                        elseif npc.SetNPCState then
-                            npc:SetNPCState(NPC_STATE_ALERT)
-                        end
-                        npc:CapabilitiesAdd(CAP_USE_WEAPONS)
-                        npc:Fire("Enable")
-                        npc:Fire("Open")
+                        elseif npc.SetNPCState then npc:SetNPCState(NPC_STATE_ALERT) end
+                        npc:CapabilitiesAdd(CAP_USE_WEAPONS) npc:Fire("Enable") npc:Fire("Open")
                     end)
                 end
             end
@@ -645,4 +603,69 @@ end
 function SWEP:SetupDataTables()
     self:NetworkVar("Bool", 0, "IsCharging")
     self:NetworkVar("Float", 0, "ChargeStartTime")
+end
+
+-- --- CUSTOMIZATION & UTILITY ---
+if SERVER then
+    concommand.Add("shovel_toggle_gold", function(ply)
+        local currentStatus = ply:GetPData("ShovelGold", "0")
+        local newStatus = (currentStatus == "1") and "0" or "1"
+        ply:SetPData("ShovelGold", newStatus)
+        ply:ChatPrint((newStatus == "1") and "Shovel set to GOLD!" or "Shovel set to NORMAL.")
+        local wep = ply:GetActiveWeapon()
+        if IsValid(wep) and wep:GetClass() == "weapon_heavyshovel" then wep:ApplyGoldMaterial() end
+    end)
+
+    concommand.Add("shovel_custom_color_cartoonish", function(ply)
+        local currentMat = ply:GetPData("ShovelMaterial", "")
+        local newMat = (currentMat == "models/debug/debugwhite") and "" or "models/debug/debugwhite"
+        ply:SetPData("ShovelMaterial", newMat)
+        ply:ChatPrint("Shovel Material: " .. (newMat == "" and "Default" or "Cartoon/Plastic"))
+        local wep = ply:GetActiveWeapon()
+        if IsValid(wep) and wep:GetClass() == "weapon_heavyshovel" then wep:ApplyCustomization() end
+    end)
+
+    concommand.Add("shovel_custom_color", function(ply, cmd, args)
+        if #args < 3 then ply:ChatPrint("Usage: shovel_custom_color <r> <g> <b>") return end
+        ply:SetPData("ShovelColorR", args[1])
+        ply:SetPData("ShovelColorG", args[2])
+        ply:SetPData("ShovelColorB", args[3])
+        ply:ChatPrint("Shovel color set to: " .. args[1] .. ", " .. args[2] .. ", " .. args[3])
+        local wep = ply:GetActiveWeapon()
+        if IsValid(wep) and wep:GetClass() == "weapon_heavyshovel" then wep:ApplyCustomization() end
+    end)
+
+    concommand.Add("shovel_reset_all", function(ply)
+        ply:SetPData("ShovelMaterial", "")
+        ply:SetPData("ShovelColorR", "255")
+        ply:SetPData("ShovelColorG", "255")
+        ply:SetPData("ShovelColorB", "255")
+        ply:ChatPrint("Shovel reset to default appearance.")
+        local wep = ply:GetActiveWeapon()
+        if IsValid(wep) and wep:GetClass() == "weapon_heavyshovel" then wep:ApplyCustomization() end
+    end)
+end
+
+function SWEP:ApplyGoldMaterial()
+    local owner = self:GetOwner()
+    if not IsValid(owner) then return end
+    if owner:GetPData("ShovelGold", "0") == "1" then self:SetMaterial("models/player/shared/gold_player") else self:SetMaterial("") end
+end
+
+function SWEP:ApplyCustomization()
+    local owner = self:GetOwner()
+    if not IsValid(owner) then return end
+    local mat = owner:GetPData("ShovelMaterial", "")
+    self:SetMaterial(mat)
+    local r = tonumber(owner:GetPData("ShovelColorR", "255"))
+    local g = tonumber(owner:GetPData("ShovelColorG", "255"))
+    local b = tonumber(owner:GetPData("ShovelColorB", "255"))
+    self:SetColor(Color(r, g, b, 255))
+end
+
+function SWEP:Deploy()
+    self:ApplyGoldMaterial()
+    self:ApplyCustomization()
+    self:SetWeaponHoldType(self.HoldType)
+    return true
 end
