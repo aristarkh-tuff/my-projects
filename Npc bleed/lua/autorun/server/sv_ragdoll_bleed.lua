@@ -385,16 +385,17 @@ hook.Add("EntityTakeDamage", "UnifiedShotBleed", function(target, dmginfo)
             end
         end
 
-        if decalType == "Blood" then
-            local mdl = string.lower(target:GetModel() or "")
-            if cls == "npc_zombie" or (cls == "prop_ragdoll" and string.find(mdl, "zombie/classic")) then
-                if target:GetBodygroup(1) == 0 then
-                    local headBone = target:LookupBone("ValveBiped.Bip01_Head1")
-                    if headBone then
-                        local bonePos = target:GetBonePosition(headBone)
-                        if bonePos and hitPos:DistToSqr(bonePos) < 225 then 
-                            decalType = "YellowBlood"
-                        end
+        if cls == "npc_zombie" and target:IsNPC() then
+            local headBone = target:LookupBone("ValveBiped.Bip01_Head1")
+            if headBone then
+                local bonePos = target:GetBonePosition(headBone)
+                if bonePos then
+                    if hitPos:DistToSqr(bonePos) < 225 then 
+                        -- Headshot: yellow blood (headcrab on the head)
+                        decalType = "YellowBlood"
+                    else
+                        -- Body shot: red blood (zombie flesh)
+                        decalType = "Blood"
                     end
                 end
             end
