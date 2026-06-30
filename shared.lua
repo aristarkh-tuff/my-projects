@@ -1,14 +1,36 @@
+-----------------------------------------------------
+-- 1. SERVER-ONLY ENGINE
+-----------------------------------------------------
 if SERVER then
-    AddCSLuaFile( "shared.lua" )
+    AddCSLuaFile("shared.lua")
     util.AddNetworkString("FlareGun_RedFirework")
+    util.AddNetworkString("UpdateFlaregunSkin") 
+    util.AddNetworkString("OlinFlareCameraRegister")
 
     SWEP.Weight             = 5
     SWEP.AutoSwitchTo       = false
     SWEP.AutoSwitchFrom     = false
+
+    -- Secure skin networking without console variable mismatch conflicts
+    net.Receive("UpdateFlaregunSkin", function(len, ply)
+        local wep = ply:GetActiveWeapon()
+        if IsValid(wep) and wep:GetClass() == "weapon_flaregun_beta" then
+            local skinVal = net.ReadInt(4)
+            wep:SetNWInt("WeaponSkin", skinVal)
+        end
+    end)
 end
 
+-----------------------------------------------------
+-- 2. CLIENT-ONLY VISUALS & HUD
+-----------------------------------------------------
+-- =====================================================
+-- START CLIENT-ONLY BLOCK (Right at the top!)
+-- =====================================================
+-- =====================================================
+-- START CLIENT-ONLY BLOCK (Right at the top!)
+-- =====================================================
 if CLIENT then
-    language.Add("weapon_flaregun_beta", "Flare Gun")
 
     SWEP.PrintName = "Flare Gun"
     SWEP.Slot = 1
@@ -20,26 +42,37 @@ if CLIENT then
     SWEP.ViewModelFlip = false
     SWEP.WepSelectIcon = surface.GetTextureID("HUD/swepicons/weapon_flaregun_beta") 
     SWEP.DrawWeaponInfoBox  = true
-    SWEP.Purpose = "Hey, here's a thought. I've got a cigarette lighter. You've got a gun. Maybe you should go first. -Odell"
+    SWEP.Purpose = "A custom tactical weapon designed to fire high-yield incendiary rocket flares."
     SWEP.Instructions = "LMB: Fire | RMB: Toggle Mode"
     SWEP.BounceWeaponIcon = false 
     SWEP.UseHands = true
 
-    -- Creates a saved client console variable for the skin preference (0 = Normal, 1 = Red, 2 = Black)
+    -----------------------------------------------------
+    -- 1. CONVARS 
+    -----------------------------------------------------
     local cl_skin = CreateClientConVar("cl_flaregun_skin", "0", true, false)
+    local cl_cam_chance = CreateClientConVar("cl_flaregun_cam_chance", "0", true, false)
+    local cl_cam_linger = CreateClientConVar("cl_flaregun_cam_linger", "0", true, false)
 
-    local function GetSkinColor()
-        if not cl_skin then return Color(255, 255, 255, 255) end
-        local val = cl_skin:GetInt()
-        if val == 1 then
-            return Color(255, 0, 0, 255)    -- Red Finish
-        elseif val == 2 then
-            return Color(0, 0, 0, 255)      -- Fully Black Finish
+    -----------------------------------------------------
+    -- NEW: SKIN COLOR HELPER FUNCTION
+    -- (This fixes the 'GetSkinColor' nil value error!)
+    -----------------------------------------------------
+    local function GetSkinColor(wep)
+        local skinMode = GetConVar("cl_flaregun_skin"):GetInt()
+        
+        if skinMode == 1 then
+            return Color(255, 75, 75, 255)   -- Red Skin Tint
+        elseif skinMode == 2 then
+            return Color(35, 35, 35, 255)    -- Fully Black Skin Tint
         end
-        return Color(255, 255, 255, 255)    -- Factory Normal
+        
+        return Color(255, 255, 255, 255)     -- Normal Skin (Default White / No Tint)
     end
 
-    -- Registers the options menu interface under Options -> Weapons -> Olin Flare skin
+    -----------------------------------------------------
+    -- 2. Q-MENU TOOL PANEL
+    -----------------------------------------------------
     hook.Add("PopulateToolMenu", "OlinFlareSkinMenu", function()
         spawnmenu.AddToolMenuOption("Options", "Weapons", "OlinFlareSkin", "Olin Flare skin", "", "", function(panel)
             panel:ClearControls()
@@ -55,25 +88,38 @@ if CLIENT then
                     ["Fully Black Skin"]  = { cl_flaregun_skin = "2" }
                 }
             })
+
+            panel:NumSlider("Projective Cam Chance", "cl_flaregun_cam_chance", 0, 1, 2)
+            panel:Help("0 = Disabled | 1 = Always follow. Probability of camera tracking the flare.")
+
+            panel:NumSlider("Camera Impact Linger", "cl_flaregun_cam_linger", 0, 10, 1)
+            panel:Help("How much the camera stays after the impact frame. NOTE: use a number below a single digit from the actual number you want because it adds on a second")
         end)
     end)
 
-    -- Dynamic viewmodel rendering adjustments
+    -----------------------------------------------------
+    -- 3. VIEWMODEL & WORLDMODEL DRAWING
+    -----------------------------------------------------
     function SWEP:PreDrawViewModel(vm, weapon, ply)
-        if IsValid(vm) then vm:SetColor(GetSkinColor()) end
+        if IsValid(vm) then vm:SetColor(GetSkinColor(self)) end
     end
 
     function SWEP:PostDrawViewModel(vm, weapon, ply)
-        if IsValid(vm) then vm:SetColor(Color(255, 255, 255, 255)) end -- Reset container so hands aren't tainted
+        if IsValid(vm) then vm:SetColor(Color(255, 255, 255, 255)) end 
     end
 
-    -- Dynamic worldmodel rendering adjustments
     function SWEP:DrawWorldModel()
-        self:SetColor(GetSkinColor())
+        self:SetColor(GetSkinColor(self))
         self:DrawModel()
     end
-end
 
+end 
+-- =====================================================
+-- END CLIENT-ONLY BLOCK
+-- =====================================================
+-----------------------------------------------------
+-- 3. SHARED BASE LAYER
+-----------------------------------------------------
 local FlareFire = Sound( "Weapon_Flaregun.Single" )
 local FlareEmpty = Sound( "Weapon_Pistol.Empty" )
 local FlareReload = Sound( "Weapon_Flaregun.Reload" )
@@ -118,6 +164,13 @@ function SWEP:Deploy()
     self.Weapon:SendWeaponAnim(ACT_VM_DRAW)
     self:SetNextPrimaryFire( CurTime() + self:SequenceDuration() )
     self:Idle()
+    
+    -- Tell the server what skin we are using the moment we pull the gun out
+    if CLIENT and IsFirstTimePredicted() then
+        net.Start("UpdateFlaregunSkin")
+            net.WriteInt(GetConVar("cl_flaregun_skin"):GetInt(), 4)
+        net.SendToServer()
+    end
     return true
 end
 
@@ -162,9 +215,8 @@ function SWEP:PrimaryAttack()
     elseif mode == 2 then 
         self.Weapon:EmitSound( "Weapon_357.Single" )
         
-        -- Recursive function to handle bullet bounces while keeping zero force setup
         local function FireSlug(src, dir, bounces)
-            if bounces > 4 then return end -- Crash guard to prevent endless bouncing loops
+            if bounces > 4 then return end 
             
             local bullet = {}
             bullet.Num = 1 
@@ -172,18 +224,15 @@ function SWEP:PrimaryAttack()
             bullet.Dir = dir
             bullet.Spread = Vector(0, 0, 0) 
             bullet.Tracer = 1
-            bullet.Force = 0 -- Keep physics pushback disabled
-            bullet.Damage = 40 -- Updated damage to 40
+            bullet.Force = 0 
+            bullet.Damage = 40 
             bullet.AmmoType = "357"
             
             bullet.Callback = function(attacker, tr, dmginfo)
-                -- 90% chance to ricochet off of metallic textures/materials
                 if tr.MatType == MAT_METAL and math.random(1, 100) <= 90 then
-                    -- Calculate dynamic angle of reflection
                     local dot = tr.Normal:Dot(tr.HitNormal)
                     local reflectDir = tr.Normal - 2 * dot * tr.HitNormal
                     
-                    -- Spawn physical spark effects and sound at impact zone
                     local effect = EffectData()
                     effect:SetOrigin(tr.HitPos)
                     effect:SetNormal(tr.HitNormal)
@@ -191,7 +240,6 @@ function SWEP:PrimaryAttack()
                     
                     sound.Play("weapons/fx/rics/ric" .. math.random(1, 5) .. ".wav", tr.HitPos, 80, math.random(90, 110))
                     
-                    -- Re-fire the reflected slug slightly forward off the wall
                     FireSlug(tr.HitPos + reflectDir * 2, reflectDir, bounces + 1)
                 end
             end
@@ -279,10 +327,13 @@ local function DetonateFlare(flare, attacker, inflictor, explicitPos, isMidAir)
     if not IsValid(flare) or flare.HasDetonated then return end
     flare.HasDetonated = true
     
+    -- NEW: Tells the camera to cut the feed immediately
+    flare:SetNWBool("OlinFlareDetonated", true)
+    
     local pos = explicitPos or flare:GetPos()
     
     local radius = isMidAir and 180 or 100
-    local damage = isMidAir and 35 or 20
+    local damage = isMidAir and 35 or 80 
     util.BlastDamage(inflictor, attacker, pos, radius, damage)
     
     net.Start("FlareGun_RedFirework")
@@ -290,7 +341,59 @@ local function DetonateFlare(flare, attacker, inflictor, explicitPos, isMidAir)
         net.WriteBool(isMidAir) 
     net.Broadcast()
     
-    flare:Remove()
+    -- SPARK SHATTER EFFECT: Spawn 3 physical shards if it hits a solid surface
+    if not isMidAir then
+        for i = 1, 3 do
+            local piece = ents.Create("prop_physics")
+            if IsValid(piece) then
+                -- Standard HL2 rock model used as a baseline chunk
+                piece:SetModel("models/props_junk/rock001a.mdl")
+                piece:SetPos(pos + Vector(0, 0, 3)) -- Slightly offset to prevent wall clipping
+                piece:SetAngles(AngleRand())
+                piece:SetModelScale(0.4, 0) -- Scale it down to look like a tiny shattered casing
+                piece:Spawn()
+                
+                -- Set to debris so it smoothly bounces around without jamming doors or blocking players
+                piece:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+                
+                -- Make the physical prop look like a superheated, glowing ember
+                piece:SetColor(Color(255, 100, 30, 255))
+                piece:SetRenderMode(RENDERMODE_TRANSCOLOR)
+                
+                local phys = piece:GetPhysicsObject()
+                if IsValid(phys) then
+                    -- Calculate a scattering vector shooting outward and up
+                    local scatterDir = VectorRand()
+                    scatterDir.z = math.abs(scatterDir.z) + 0.5 
+                    scatterDir:Normalize()
+                    
+                    phys:SetVelocity(scatterDir * math.random(250, 500))
+                    phys:SetMass(1)
+                    phys:Wake()
+                end
+                
+                -- Additive bright trail configured to slowly fade out over exactly 5 seconds
+                util.SpriteTrail(piece, 0, Color(255, 50, 15), true, 4, 0, 5.0, 0.05, "effects/beam_generic01.vmt")
+                
+                -- Safely remove the physical chunk right as its 5-second trail finishes fading
+                SafeRemoveEntityDelayed(piece, 5)
+            end
+        end
+    end
+    
+    -- Hides the physical SMG grenade model completely so it doesn't float
+    flare:SetNoDraw(true)
+    
+    -- Freeze the main body in place and remove collisions so it doesn't block anything
+    flare:SetNotSolid(true)
+    local phys = flare:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:EnableMotion(false)
+        phys:Sleep()
+    end
+    
+    -- The core entity stays alive for 5 seconds so its main trail can finish drawing too
+    SafeRemoveEntityDelayed(flare, 5) 
 end
 
 function SWEP:LaunchFlare(force)
@@ -304,11 +407,20 @@ function SWEP:LaunchFlare(force)
     flare:SetModel("models/items/ar2_grenade.mdl")
     flare:SetPos( ply:GetShootPos() + ply_Ang:Forward() * 18 + ply_Ang:Right() * 8 + ply_Ang:Up() * -2 )
     flare:SetAngles(ply_Ang)
-    flare:SetOwner(ply)
+    -- Inside your SWEP:LaunchFlare function:
+flare:SetPos( ply:GetShootPos() + ply_Ang:Forward() * 35 + ply_Ang:Right() * 8 + ply_Ang:Up() * -2 )
+
+-- Make absolutely sure this line is gone or commented out:
+-- flare:SetOwner(ply)
     
-    flare:Spawn()
+   flare:Spawn()
+    
+    -- NEW: Instantly broadcast the precise ID of this flare to the player who shot it
+    net.Start("OlinFlareCameraRegister")
+        net.WriteInt(flare:EntIndex(), 16)
+    net.Send(ply)
+
     flare:SetMoveType(MOVETYPE_VPHYSICS)
-    flare:SetSolid(SOLID_VPHYSICS)
     
     flare:SetColor(Color(255, 120, 60, 255))
     flare:SetRenderMode(RENDERMODE_TRANSCOLOR)
@@ -321,7 +433,8 @@ function SWEP:LaunchFlare(force)
         phys:Wake()
     end
     
-    util.SpriteTrail(flare, 0, Color(255, 40, 15), false, 14, 2, 0.75, 0.05, "effects/beam_generic01.vmt")
+    -- FIXED: Trail is now smaller (6->0), has additive glow enabled (true), and lasts much longer (3.5s)
+    util.SpriteTrail(flare, 0, Color(255, 60, 20), true, 6, 0, 3.5, 0.05, "effects/beam_generic01.vmt")
     
     flare.SpawnTime = CurTime()
     flare.Shooter = ply
@@ -338,6 +451,7 @@ function SWEP:LaunchFlare(force)
     local fIdx = flare:EntIndex()
     timer.Create("FlareTracker_" .. fIdx, 0.05, 0, function()
         if not IsValid(flare) then timer.Remove("FlareTracker_" .. fIdx) return end
+        if flare.HasDetonated then timer.Remove("FlareTracker_" .. fIdx) return end -- Stop tracing if already exploded
         
         if CurTime() - flare.SpawnTime > 4.9 then
             DetonateFlare(flare, flare.Shooter, flare.Wep, flare:GetPos(), true)
@@ -538,5 +652,92 @@ if CLIENT then
         end
         
         emitter:Finish()
+    end)
+end
+
+if CLIENT then
+    -- Receives the tracking data when a flare is launched
+    net.Receive("OlinFlareCameraRegister", function()
+        local entIdx = net.ReadInt(16)
+        local chance = GetConVar("cl_flaregun_cam_chance"):GetFloat()
+        
+        if math.Rand(0, 1) <= chance then
+            LocalPlayer().OlinTargetFlareIndex = entIdx
+            LocalPlayer().OlinLastFlarePos = nil
+            LocalPlayer().OlinLingerStartTime = nil
+            LocalPlayer().OlinFlareHasMoved = false -- Resets the impact sensor
+        end
+    end)
+
+    -- Bulletproof camera engine with instant-impact detection
+    hook.Add("CalcView", "OlinFlareCameraView", function(ply, pos, angles, fov)
+        if not IsValid(ply) then return end
+        
+        local targetIdx = ply.OlinTargetFlareIndex
+        if not targetIdx then return end
+        
+        local flare = Entity(targetIdx)
+        local lingerTime = GetConVar("cl_flaregun_cam_linger"):GetFloat()
+        local shouldLinger = false
+        
+        if IsValid(flare) then
+            local speed = flare:GetVelocity():LengthSqr()
+            
+            -- Detect if the flare has officially launched into the air
+            if speed > 500 then
+                ply.OlinFlareHasMoved = true
+            end
+            
+            -- IMPACT TRIGGER: If it was flying but suddenly froze in place (0 speed)
+            if ply.OlinFlareHasMoved and speed < 100 then
+                shouldLinger = true
+            else
+                -- Still mid-air, lock onto its live coordinates
+                ply.OlinLastFlarePos = flare:GetPos()
+            end
+        else
+            -- FALLBACK: The entity was completely deleted by the server
+            shouldLinger = true
+        end
+        
+        -- CAMERA CONTROLLER
+        if shouldLinger then
+            -- Lock the exact millisecond of impact
+            if not ply.OlinLingerStartTime then
+                ply.OlinLingerStartTime = CurTime()
+            end
+            
+            -- The moment the slider countdown hits zero, return to player eyes
+            if CurTime() > ply.OlinLingerStartTime + lingerTime then
+                ply.OlinTargetFlareIndex = nil
+                ply.OlinLastFlarePos = nil
+                ply.OlinLingerStartTime = nil
+                ply.OlinFlareHasMoved = false
+                return
+            end
+        end
+        
+        -- Render the third-person camera matrix (live or cached aftermath)
+        if ply.OlinLastFlarePos then
+            local targetPos = ply.OlinLastFlarePos
+            local viewAngles = ply:EyeAngles()
+            local distance = 120 
+            
+            local trData = {}
+            trData.start = targetPos
+            trData.endpos = targetPos - viewAngles:Forward() * distance
+            trData.filter = {ply, flare}
+            local tr = util.TraceLine(trData)
+            
+            local view = {}
+            view.origin = tr.HitPos + tr.HitNormal * 2
+            view.angles = viewAngles
+            view.fov = fov
+            view.drawviewer = true 
+            return view
+        else
+            -- Safety net: clear out if no positions logged
+            ply.OlinTargetFlareIndex = nil
+        end
     end)
 end
