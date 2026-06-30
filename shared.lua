@@ -329,6 +329,37 @@ local function DetonateFlare(flare, attacker, inflictor, explicitPos, isMidAir)
     
     -- NEW: Tells the camera to cut the feed immediately
     flare:SetNWBool("OlinFlareDetonated", true)
+
+-----------------------------------------------------
+    -- FIXED: 6-WAY OMNIDIRECTIONAL SCORCH SCANNER
+    -----------------------------------------------------
+    -- We scan all 6 axes around the flare so orientation doesn't matter
+    local scanDirections = {
+        -flare:GetUp(),       -- 1. Straight Down (Catches flat drops!)
+        flare:GetForward(),   -- 2. Straight Forward
+        -flare:GetForward(),  -- 3. Backward
+        flare:GetRight(),     -- 4. Right Side
+        -flare:GetRight(),    -- 5. Left Side
+        flare:GetUp()         -- 6. Straight Up
+    }
+
+    for _, dir in ipairs(scanDirections) do
+        local scorchTrace = {}
+        scorchTrace.start = flare:GetPos()
+        scorchTrace.endpos = flare:GetPos() + (dir * 45) -- 45 unit reach to guarantee a surface catch
+        scorchTrace.filter = flare
+        scorchTrace.mask = MASK_SOLID -- Forces the trace to impact world geometry AND solid physical props
+        
+        local tr = util.TraceLine(scorchTrace)
+
+        -- The exact frame it detects a solid object or physical prop...
+        if tr.Hit and tr.Entity then
+            -- Paint the FadingScorch flat against the surface normal
+            util.Decal("FadingScorch", tr.HitPos + tr.HitNormal, tr.HitPos - tr.HitNormal, flare)
+            break -- Surface found and painted! Stop the loop so it doesn't spray multiple decals.
+        end
+    end
+    -----------------------------------------------------
     
     local pos = explicitPos or flare:GetPos()
     
