@@ -718,14 +718,24 @@ if SERVER then
 
     local function TryReplaceProp(ent)
         if not IsValid(ent) then return false end
-        if ent.DrinkAmmo then return false end -- Do not swap items that are already system weapons thrown down
+        if ent.DrinkAmmo then return false end -- Do not swap custom drops
         
         local model = ent:GetModel()
-        if model and propReplacements[model] then
+        if not model or model == "" then return false end
+        
+        if propReplacements[model] then
             local swepClass = propReplacements[model]()
             if swepClass then
                 local pos = ent:GetPos()
                 local ang = ent:GetAngles()
+                
+                -- Capture old physics velocities for natural movement
+                local velocity = ent:GetVelocity()
+                local angVelocity = Vector(0,0,0)
+                local physObj = ent:GetPhysicsObject()
+                if IsValid(physObj) then
+                    angVelocity = physObj:GetAngleVelocity()
+                end
                 
                 local weaponItem = ents.Create(swepClass)
                 if IsValid(weaponItem) then
@@ -733,8 +743,13 @@ if SERVER then
                     weaponItem:SetAngles(ang)
                     weaponItem:Spawn()
                     
-                    local phys = weaponItem:GetPhysicsObject()
-                    if IsValid(phys) then phys:Wake() end
+                    -- Re-apply velocities onto the newly spawned item SWEP
+                    local targetPhys = weaponItem:GetPhysicsObject()
+                    if IsValid(targetPhys) then 
+                        targetPhys:Wake() 
+                        targetPhys:SetVelocity(velocity)
+                        targetPhys:AddAngleVelocity(angVelocity)
+                    end
                     
                     ent:Remove() 
                     return true
@@ -744,12 +759,19 @@ if SERVER then
         return false
     end
 
-    -- Universal Dynamic Catching Hook (Catches map loads, cleanups, vending machine outputs, and player spawns)
+    -- Target physical object classes including map-overrides and internal vending entities
+    local trackingClasses = {
+        ["prop_physics"] = true,
+        ["prop_physics_multiplayer"] = true,
+        ["prop_physics_override"] = true,
+        ["obj_vending_can"] = true
+    }
+
+    -- Adjusted delay to ensure models load cleanly into engine slots before evaluations
     hook.Add("OnEntityCreated", "DrinkSystemDynamicPropReplacement", function(ent)
         if not IsValid(ent) then return end
-        local class = ent:GetClass()
-        if class == "prop_physics" or class == "prop_physics_multiplayer" then
-            timer.Simple(0, function()
+        if trackingClasses[ent:GetClass()] then
+            timer.Simple(0.05, function()
                 if IsValid(ent) then
                     TryReplaceProp(ent)
                 end
@@ -759,8 +781,11 @@ if SERVER then
 
     local function ReplaceMapProps()
         timer.Simple(0.5, function()
-            for _, ent in ipairs(ents.FindByClass("prop_physics")) do TryReplaceProp(ent) end
-            for _, ent in ipairs(ents.FindByClass("prop_physics_multiplayer")) do TryReplaceProp(ent) end
+            for class, _ in pairs(trackingClasses) do
+                for _, ent in ipairs(ents.FindByClass(class)) do 
+                    TryReplaceProp(ent) 
+                end
+            end
         end)
     end
     hook.Add("InitPostEntity", "DrinkSystemReplaceProps", ReplaceMapProps)
