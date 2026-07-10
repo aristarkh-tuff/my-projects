@@ -1,4 +1,4 @@
--- Single-file Food & Drink Props System (Jug, Uncapped Vodka, Milk Detox, Bottle Shatter & Melon Gib Update)
+-- Single-file Food & Drink Props System (Jug, Uncapped Vodka, Milk Detox, Bottle Shatter, Melon Gib & Dynamic Can Replacement Update)
 -- Save this file in: garrysmod/lua/autorun/sh_drink_system.lua
 
 local cv_tf2 = CreateConVar("gmod_food_tf2_mode", "0", {FCVAR_REPLICATED, FCVAR_ARCHIVE}, "Enable TF2 Content Mode (Adds Heavy's Sandvich)")
@@ -461,7 +461,7 @@ local drinkConfigs = {
         printName = "Closed Beer Bottle", 
         model = "models/props_junk/garbage_glassbottle001a.mdl",
         skin = 0,
-        maxHP = 40,
+        maxHP = 20,
         hudColor = Color(200, 130, 45),
         isBeer = true,
         isLiquid = true,
@@ -717,9 +717,10 @@ if SERVER then
     end)
 
     local function TryReplaceProp(ent)
-        if not IsValid(ent) then return end
-        local model = ent:GetModel()
+        if not IsValid(ent) then return false end
+        if ent.DrinkAmmo then return false end -- Do not swap items that are already system weapons thrown down
         
+        local model = ent:GetModel()
         if model and propReplacements[model] then
             local swepClass = propReplacements[model]()
             if swepClass then
@@ -743,19 +744,27 @@ if SERVER then
         return false
     end
 
+    -- Universal Dynamic Catching Hook (Catches map loads, cleanups, vending machine outputs, and player spawns)
+    hook.Add("OnEntityCreated", "DrinkSystemDynamicPropReplacement", function(ent)
+        if not IsValid(ent) then return end
+        local class = ent:GetClass()
+        if class == "prop_physics" or class == "prop_physics_multiplayer" then
+            timer.Simple(0, function()
+                if IsValid(ent) then
+                    TryReplaceProp(ent)
+                end
+            end)
+        end
+    end)
+
     local function ReplaceMapProps()
-        timer.Simple(1, function()
-            for _, ent in ipairs(ents.FindByClass("prop_physics")) do
-                TryReplaceProp(ent)
-            end
+        timer.Simple(0.5, function()
+            for _, ent in ipairs(ents.FindByClass("prop_physics")) do TryReplaceProp(ent) end
+            for _, ent in ipairs(ents.FindByClass("prop_physics_multiplayer")) do TryReplaceProp(ent) end
         end)
     end
     hook.Add("InitPostEntity", "DrinkSystemReplaceProps", ReplaceMapProps)
     hook.Add("PostCleanupMap", "DrinkSystemCleanupProps", ReplaceMapProps)
-
-    hook.Add("PlayerSpawnedProp", "DrinkSystemPlayerSpawnedProp", function(ply, model, ent)
-        TryReplaceProp(ent)
-    end)
 
     -- RESET ON DEATH HOOK
     hook.Add("PlayerDeath", "DrinkSystemResetOnDeath", function(ply)
