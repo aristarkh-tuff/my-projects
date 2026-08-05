@@ -9,7 +9,7 @@ end
 
 SWEP.PrintName = "Prop Possessor"
 SWEP.Author = "AI Assistant"
-SWEP.Instructions = "Left Click a physics prop or ragdoll to possess it. (WASD to push, Shift + WASD to sprint, Space to jump, Ctrl to leave)"
+SWEP.Instructions = "Left Click a prop/ragdoll to possess. (WASD push, Shift sprint, Space jump, R taunt, Ctrl leave)"
 SWEP.Category = "Custom Weapons"
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -51,6 +51,18 @@ if SERVER then
         ["func_physbox"] = true,
         ["prop_ragdoll"] = true
     }
+    
+    -- Table of random funny sounds for taunting
+    local TauntSounds = {
+        "vo/npc/male01/hacks01.wav",
+        "vo/npc/male01/hahaha02.wav",
+        "vo/npc/male01/overhere01.wav",
+        "vo/npc/male01/question26.wav",
+        "npc/crow/alert2.wav",
+        "ambient/creatures/town_zombie_call1.wav",
+        "vo/coast/bugbait/sandy_help.wav",
+        "npc/headcrab/headbite.wav"
+    }
 
     -- Handles releasing a player from a prop safely
     local function UnpossessProp(ply, prop, destroyed, alreadyRemoving)
@@ -59,7 +71,6 @@ if SERVER then
         ply:Spawn() 
         
         if IsValid(prop) then
-            -- Snag the location right before the entity drops out of the world instance
             local pos = prop:GetPos()
             local maxs = prop:OBBMaxs()
             ply:SetPos(pos + Vector(0, 0, maxs.z + 10))
@@ -80,11 +91,26 @@ if SERVER then
         
         ply:SetNWEntity("PossessedProp", NULL)
         
+        -- Restore original weapons and exact clip / reserve ammo states
         timer.Simple(0.1, function()
             if IsValid(ply) then
                 ply:StripWeapons()
-                for _, wep in ipairs(ply.SavedWeapons or {}) do
-                    ply:Give(wep)
+                
+                for _, wepData in ipairs(ply.SavedWeapons or {}) do
+                    ply:Give(wepData.class)
+                end
+                
+                ply:RemoveAllAmmo()
+                for ammoID, ammoAmt in pairs(ply.SavedAmmo or {}) do
+                    ply:SetAmmo(ammoAmt, ammoID)
+                end
+                
+                for _, wepData in ipairs(ply.SavedWeapons or {}) do
+                    local wep = ply:GetWeapon(wepData.class)
+                    if IsValid(wep) then
+                        wep:SetClip1(wepData.clip1)
+                        wep:SetClip2(wepData.clip2)
+                    end
                 end
             end
         end)
@@ -101,9 +127,19 @@ if SERVER then
         
         if IsValid(ent) and ValidPossessClasses[ent:GetClass()] and tr.HitPos:Distance(ply:GetPos()) < 2000 then
             
+            -- Save current loadout
             ply.SavedWeapons = {}
             for _, wep in ipairs(ply:GetWeapons()) do
-                table.insert(ply.SavedWeapons, wep:GetClass())
+                table.insert(ply.SavedWeapons, {
+                    class = wep:GetClass(),
+                    clip1 = wep:Clip1(),
+                    clip2 = wep:Clip2()
+                })
+            end
+            
+            ply.SavedAmmo = {}
+            for ammoID, ammoAmt in pairs(ply:GetAmmo() or {}) do
+                ply.SavedAmmo[ammoID] = ammoAmt
             end
             
             ply:SetNWEntity("PossessedProp", ent)
@@ -115,6 +151,7 @@ if SERVER then
             ent:SetMaxHealth(50)
             
             ply:SetNWFloat("PossessTime", CurTime())
+            ply:SetNWFloat("NextTauntTime", CurTime()) -- Ready to taunt immediately
             ply:SetNWFloat("PunchOMeter", 100)
             ply.NextPropPush = 0 
             ply.NextPropJump = 0
@@ -123,7 +160,7 @@ if SERVER then
             ply:Spectate(OBS_MODE_CHASE)
             ply:SpectateEntity(ent)
             
-            ply:ChatPrint("Possessed! WASD to move, Hold SHIFT to sprint. You must wait 10s to leave (Ctrl).")
+            ply:ChatPrint("Possessed! WASD to move, Space to jump, R to taunt, Ctrl to leave.")
         end
     end
 
@@ -176,7 +213,7 @@ if SERVER then
                     ply.IsMovingProp = false
                 end
                 
-                -- 2. Jump Processing (Now with Headcrab Super Jump detection)
+                -- 2. Jump Processing (With Headcrab Super Jump detection)
                 if cmd:KeyDown(IN_JUMP) and (ply.NextPropJump or 0) < CurTime() and meter >= 15 then
                     local center = prop:WorldSpaceCenter()
                     local halfHeight = (prop:OBBMaxs().z - prop:OBBMins().z) / 2
@@ -188,12 +225,11 @@ if SERVER then
                     })
                     
                     if tr.Hit then
-                        local jumpForce = 250 -- Default jump force
+                        local jumpForce = 250 
                         
-                        -- Check if model path contains "headcrab" to trigger a higher leap
                         local mdl = prop:GetModel()
                         if mdl and string.find(string.lower(mdl), "headcrab") then
-                            jumpForce = 650 -- Real headcrabs launch into orbit!
+                            jumpForce = 650 
                         end
 
                         for i = 0, physCount - 1 do
@@ -211,7 +247,34 @@ if SERVER then
                 end
             end
 
-            -- 3. Intercept Ctrl (IN_DUCK) Leaving Logic
+            -- 3. Taunt Processing (Sound, Heal, Meter Refill)
+            if cmd:KeyDown(IN_RELOAD) then
+                if CurTime() >= ply:GetNWFloat("NextTauntTime", 0) then
+                    ply:SetNWFloat("NextTauntTime", CurTime() + 5)
+                    
+                    if SERVER then
+                        local snd = TauntSounds[math.random(#TauntSounds)]
+                        local vol = math.Rand(0.5, 1.0)
+                        local pitch = math.random(70, 130)
+                        
+                        prop:EmitSound(snd, 75, pitch, vol)
+                        
+                        -- Heal based on volume: 0.5 vol = 5 HP, 1.0 vol = 10 HP
+                        local healAmt = math.Round(5 + ((vol - 0.5) * 10))
+                        local newHp = math.min(prop:GetMaxHealth(), prop:Health() + healAmt)
+                        prop:SetHealth(newHp)
+                        
+                        -- Refill Punch-O-Meter fully
+                        ply:SetNWFloat("PunchOMeter", 100)
+                        
+                        -- Optional: Add a little flash to show they got healed
+                        prop:SetColor(Color(100, 255, 100))
+                        timer.Simple(0.15, function() if IsValid(prop) then prop:SetColor(Color(255,255,255)) end end)
+                    end
+                end
+            end
+
+            -- 4. Intercept Ctrl (IN_DUCK) Leaving Logic
             if cmd:KeyDown(IN_DUCK) then
                 local enterTime = ply:GetNWFloat("PossessTime", 0)
                 if CurTime() - enterTime < 10 then
@@ -228,13 +291,14 @@ if SERVER then
                 end
             end
 
-            -- 4. Strip action buttons from engine to stop spectator camera interference
+            -- 5. Strip action buttons from engine to stop spectator camera interference
             local buttons = cmd:GetButtons()
             buttons = bit.band(buttons, bit.bnot(IN_DUCK))
             buttons = bit.band(buttons, bit.bnot(IN_ATTACK))
             buttons = bit.band(buttons, bit.bnot(IN_ATTACK2))
-            buttons = bit.band(buttons, bit.bnot(IN_USE)) 
+            buttons = bit.band(buttons, bit.bnot(IN_USE)) -- Stripping IN_USE stops them from grabbing themselves
             buttons = bit.band(buttons, bit.bnot(IN_JUMP)) 
+            buttons = bit.band(buttons, bit.bnot(IN_RELOAD)) 
             cmd:SetButtons(buttons)
         end
     end)
@@ -250,17 +314,19 @@ if SERVER then
         end
     end)
 
-    -- Hook: Completely block 'E' interactions globally
+    -- Hook: Block ONLY the possessing player from pressing E (Others can pick them up now)
     hook.Add("PlayerUse", "PropPossessor_BlockUse", function(ply, ent)
-        if IsValid(ply:GetNWEntity("PossessedProp")) then return false end
-        if IsValid(ent) and IsValid(ent:GetNWEntity("PossessorPlayer")) then return false end
+        -- If the player is currently possessing a prop, they cannot interact with anything
+        if IsValid(ply:GetNWEntity("PossessedProp")) then 
+            return false 
+        end
+        -- Note: We removed the block for target entities so OTHER players can grab you with E!
     end)
 
     -- Hook: Handle Damage & Selective Ragdoll Physical Immunity
     hook.Add("EntityTakeDamage", "PropPossessor_Damage", function(target, dmginfo)
         local ply = target:GetNWEntity("PossessorPlayer")
         if IsValid(ply) then
-            -- Ragdoll Physical Immunity Check (Immune to smash/fall damage, vulnerable to bullets)
             if target:GetClass() == "prop_ragdoll" then
                 if dmginfo:IsDamageType(DMG_CRUSH) or dmginfo:IsDamageType(DMG_FALL) then
                     dmginfo:SetDamage(0)
@@ -268,7 +334,6 @@ if SERVER then
                 end
             end
 
-            -- Standard Destructible Processing
             local hp = target:Health() - dmginfo:GetDamage()
             target:SetHealth(hp)
             
@@ -281,7 +346,7 @@ if SERVER then
         end
     end)
     
-    -- Hook: Safe Spawning on External Deletions (Remover tool, cleanups, map events)
+    -- Hook: Safe Spawning on External Deletions
     hook.Add("EntityRemoved", "PropPossessor_SafeSpawnAndDisconnect", function(ent)
         if ent:IsPlayer() then
             local prop = ent:GetNWEntity("PossessedProp")
@@ -340,6 +405,17 @@ if CLIENT then
             draw.SimpleText(string.format("Wait %d s to leave", math.ceil(timeLeft)), "PropPossessFont", cx, h - 156, Color(255, 100, 100), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
         else
             draw.SimpleText("Press CTRL to leave", "PropPossessFont", cx, h - 156, Color(100, 255, 100), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+        end
+
+        -- Taunt Cooldown Indicator
+        local nextTaunt = ply:GetNWFloat("NextTauntTime", 0)
+        local tauntLeft = math.max(0, nextTaunt - CurTime())
+        
+        draw.RoundedBox(6, cx - 100, h - 205, 200, 28, Color(0, 0, 0, 180))
+        if tauntLeft > 0 then
+            draw.SimpleText(string.format("Taunt Cooldown: %ds", math.ceil(tauntLeft)), "PropPossessFont", cx, h - 191, Color(150, 150, 150), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+        else
+            draw.SimpleText("TAUNT READY (R)", "PropPossessFont", cx, h - 191, Color(255, 200, 50), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
         end
     end)
     
