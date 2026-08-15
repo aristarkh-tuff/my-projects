@@ -1,14 +1,17 @@
--- sv_dynamic_collapse.lua
 if CLIENT then return end
 
 -- ⚙️ CONFIGURATION
-local RAGDOLL_DAMAGE_SCALE      = 0.3    -- Multiplier for incoming damage to ragdolls
+local RAGDOLL_GUN_DAMAGE_SCALE  = 2.5    -- Guns deal 2.5x damage to collapsed ragdolls only
+local RAGDOLL_PHYS_DAMAGE_SCALE = 0.25   -- Physical/crush damage resistance (0.25x damage taken)
+local RAGDOLL_GENERIC_SCALE     = 1.0    -- Multiplier for standard damage (explosions, fire, etc.)
 local RAGDOLL_HEALTH_MULTIPLIER = 2.5    -- Ragdolls receive 2.5x base health
 
 local COLLAPSE_LEG_DAMAGE       = 8      -- Minimum leg damage to trigger collapse
-local HEAVY_LEG_DAMAGE          = 15     -- Leg damage threshold to break legs permanently (accumulates over multiple shots)
+local HEAVY_LEG_DAMAGE          = 15     -- Leg damage threshold to break legs permanently
 local COLLAPSE_FALL_DAMAGE      = 10     -- Minimum fall damage to trigger collapse
 local COLLAPSE_SHOTGUN_DAMAGE   = 10     -- Minimum shotgun/buckshot damage to trigger collapse
+local COLLAPSE_INSTANT_DAMAGE   = 19     -- Immediate collapse threshold for a single large hit
+local COLLAPSE_DAMAGE_STACK_WINDOW = 2.5  -- Time window for damage to stack before resetting
 
 local MID_AIR_FALL_SPEED        = 400    -- Downward Z velocity to trigger fall ragdoll
 local TRIP_SPEED_THRESHOLD      = 110    -- Minimum movement velocity to trigger a prop trip
@@ -19,9 +22,43 @@ local HEADCRAB_DROWN_DAMAGE     = 6      -- Damage taken per second while headcr
 
 local MIN_RECOVERY_TIME         = 3.0    -- Minimum seconds knocked out (legs NOT broken)
 local MAX_RECOVERY_TIME         = 10.0   -- Maximum seconds knocked out (legs NOT broken)
+local MEDKIT_OVERHEAL_DURATION  = 8.0    -- Seconds for medkit over-heal to fade away
 
 local ZOMBINE_GRENADE_CHANCE    = 40     -- Percentage chance for Zombine grenade on collapse
 local BLEND_DURATION            = 1.4    -- Seconds to transition back upright
+
+-- 🛠️ VJ BASE DETECTION HELPER
+local function IsVJBaseNPC(ent)
+    if not IsValid(ent) then return false end
+    return (ent.IsVJBase == true) 
+        or (ent.IsVJBase_SNPC == true) 
+        or (ent.VJ_IsHugeNPC ~= nil) 
+        or (ent.VJBase ~= nil)
+end
+
+-- 🎯 SPECIFIC NPC DEATH TRACKER (Filtered for VJ Base duplicate issues)
+local RecentNPCDeaths = {}
+
+local function RegisterNPCDeath(npc, isInstant, ragdoll)
+    if not IsValid(npc) then return end
+    RecentNPCDeaths[npc:EntIndex()] = {
+        model = npc:GetModel(),
+        pos = npc:GetPos(),
+        instant = isInstant or false,
+        ragdoll = ragdoll or nil,
+        isVJ = IsVJBaseNPC(npc),
+        time = CurTime()
+    }
+end
+
+timer.Create("DynamicCollapse_CleanRecentDeaths", 1.0, 0, function()
+    local now = CurTime()
+    for idx, info in pairs(RecentNPCDeaths) do
+        if now - info.time > 1.5 then
+            RecentNPCDeaths[idx] = nil
+        end
+    end
+end)
 
 -- 🛡️ SAFE WATER LEVEL HELPER (Prevents NULL Entity errors)
 local function SafeWaterLevel(ent)
@@ -76,7 +113,28 @@ local function IsHeadcrabNPC(ent)
     return string.find(cls, "headcrab") ~= nil
 end
 
--- Helper to get maximum health for an NPC
+local function ResetCollapseDamageStack(npc)
+    if not IsValid(npc) then return end
+    npc.DynamicCollapseDamageStack = 0
+    npc.DynamicCollapseDamageStackResetTime = 0
+end
+
+local function AddCollapseDamageStack(npc, damage)
+    if not IsValid(npc) or npc.IsCollapsing then return 0 end
+    local amount = math.max(0, damage or 0)
+    if amount <= 0 then return (npc.DynamicCollapseDamageStack or 0) end
+
+    local now = CurTime()
+    if not npc.DynamicCollapseDamageStackResetTime or now >= npc.DynamicCollapseDamageStackResetTime then
+        npc.DynamicCollapseDamageStack = 0
+    end
+
+    local stack = (npc.DynamicCollapseDamageStack or 0) + amount
+    npc.DynamicCollapseDamageStack = stack
+    npc.DynamicCollapseDamageStackResetTime = now + COLLAPSE_DAMAGE_STACK_WINDOW
+    return stack
+end
+
 local function GetNPCMaxHealth(npc)
     if not IsValid(npc) then return 100 end
     if not npc.MaxHealthLimit or npc.MaxHealthLimit <= 0 then
@@ -86,10 +144,50 @@ local function GetNPCMaxHealth(npc)
     return npc.MaxHealthLimit
 end
 
--- Forward declaration of stand-up transition
+local function ApplyNPCOverhealDecay(npc)
+    if not IsValid(npc) then return end
+    local overHealAmount = npc.OverhealAmount or 0
+    if overHealAmount <= 0 then return end
+
+    local maxHp = GetNPCMaxHealth(npc)
+    local currentHp = npc:Health()
+    if currentHp <= maxHp then
+        npc.OverhealAmount = 0
+        npc.OverhealDecayStart = nil
+        return
+    end
+
+    local elapsed = CurTime() - (npc.OverhealDecayStart or CurTime())
+    local remainingOverheal = math.max(0, overHealAmount - (overHealAmount * elapsed / MEDKIT_OVERHEAL_DURATION))
+    local targetHp = maxHp + remainingOverheal
+
+    if currentHp > targetHp then
+        npc:SetHealth(targetHp)
+    end
+
+    if remainingOverheal <= 0 then
+        npc.OverhealAmount = 0
+        npc.OverhealDecayStart = nil
+    end
+end
+
+local function AddNPCOverheal(npc, amount)
+    if not IsValid(npc) or amount <= 0 then return end
+
+    local maxHp = GetNPCMaxHealth(npc)
+    local currentHp = npc:Health()
+    if currentHp >= maxHp then
+        local extra = amount
+        npc.OverhealAmount = (npc.OverhealAmount or 0) + extra
+        npc.OverhealDecayStart = CurTime()
+        npc:SetHealth(currentHp + extra)
+    else
+        npc:SetHealth(math.min(maxHp + amount, currentHp + amount))
+    end
+end
+
 local TransitionToStand
 
--- 🏖️ SHOREFINDER: Scans 360 degrees for nearest dry land
 local function FindNearestShorePos(pos)
     local bestPos = nil
     local bestDistSqr = 2500 * 2500
@@ -132,9 +230,9 @@ local function FindNearestShorePos(pos)
     return bestPos
 end
 
--- 🩺 MEDICAL PICKUP & HEALING SYSTEM
 local function ApplyHealthItem(npc, item)
     if not IsValid(npc) or not IsValid(item) then return end
+    if npc.HeadshotKilled or npc.IsInstantKilled then return end
 
     local cls = item:GetClass()
     local isVial = (cls == "item_healthvial")
@@ -146,6 +244,7 @@ local function ApplyHealthItem(npc, item)
     local brokenLegs = npc.BrokenLegsCount or (npc.LegsBroken and 1 or 0)
     local healAmount = 0
     local soundName = isVial and "items/smallmedkit1.wav" or "items/medshot4.wav"
+    local hadSingleBrokenLeg = brokenLegs == 1
 
     if isVial then
         healAmount = 10
@@ -165,11 +264,13 @@ local function ApplyHealthItem(npc, item)
         npc.LegsBroken = false
         npc.LeftLegBroken = false
         npc.RightLegBroken = false
-        npc.LeftLegDamage = 0
-        npc.RightLegDamage = 0
     end
 
     local newHP = currentHP + healAmount
+    if isKit and hadSingleBrokenLeg then
+        newHP = newHP + 10
+        AddNPCOverheal(npc, 10)
+    end
     npc:SetHealth(newHP)
 
     if IsValid(npc.LinkedRagdoll) then
@@ -194,7 +295,6 @@ local function IsPlayerAwareOrNearby(npc)
     for _, ply in ipairs(player.GetAll()) do
         if IsValid(ply) and ply:Alive() then
             local distSqr = npcPos:DistToSqr(ply:GetPos())
-
             if distSqr <= (500 * 500) then return true end
 
             if distSqr <= (1200 * 1200) then
@@ -218,7 +318,7 @@ local function IsPlayerAwareOrNearby(npc)
 end
 
 local function TriggerMetrocopSurrender(npc)
-    if not IsValid(npc) or npc.IsSurrendering or npc.IsCollapsing or npc.IsSpared then return end
+    if not IsValid(npc) or npc.IsSurrendering or npc.IsCollapsing or npc.IsSpared or npc.HeadshotKilled or npc.IsInstantKilled then return end
     
     npc.IsSurrendering = true
     npc:ClearSchedule()
@@ -299,6 +399,42 @@ local function CleanResetBones(npc)
     end
 end
 
+local function TransferBonemergeChildrenToRagdoll(npc, ragdoll)
+    if not IsValid(npc) or not IsValid(ragdoll) then return end
+
+    local searchPos = npc:GetPos()
+    for _, ent in ipairs(ents.FindInSphere(searchPos, 256)) do
+        if not IsValid(ent) then continue end
+        if ent:IsNPC() then continue end
+        if ent:GetParent() ~= npc then continue end
+
+        local cls = string.lower(ent:GetClass() or "")
+        local mdl = string.lower(ent:GetModel() or "")
+
+        if string.find(cls, "headcrab") or string.find(mdl, "headcrab") then
+            ent._DynamicCollapse_OldParent = npc
+            ent._DynamicCollapse_Transfered = true
+            ent:SetParent(ragdoll)
+        end
+    end
+end
+
+local function RestoreBonemergeChildrenFromRagdoll(npc, ragdoll)
+    if not IsValid(npc) or not IsValid(ragdoll) then return end
+
+    local searchPos = ragdoll:GetPos()
+    for _, ent in ipairs(ents.FindInSphere(searchPos, 512)) do
+        if not IsValid(ent) then continue end
+        if ent:IsNPC() then continue end
+        if not ent._DynamicCollapse_Transfered then continue end
+        if ent._DynamicCollapse_OldParent ~= npc then continue end
+
+        ent:SetParent(npc)
+        ent._DynamicCollapse_Transfered = nil
+        ent._DynamicCollapse_OldParent = nil
+    end
+end
+
 local function GetZombieSwipeDamage(npc)
     if not IsValid(npc) then return 15 end
     local cls = string.lower(npc:GetClass())
@@ -314,7 +450,6 @@ local function IsZombine(npc)
     return string.find(cls, "zombine") ~= nil or string.find(mdl, "zombie_soldier") ~= nil
 end
 
--- 🩹 INJURY HOLDING SYSTEM
 local function ApplyInjuryHoldConstraint(ragdoll, hitgroup)
     if not IsValid(ragdoll) then return end
     if math.random(1, 100) > 65 then return end
@@ -350,15 +485,15 @@ local function ApplyInjuryHoldConstraint(ragdoll, hitgroup)
     end
 end
 
--- 💣 ZOMBINE RAGDOLL SUICIDE GRENADE SYSTEM
 local function TryTriggerZombineGrenade(npc, ragdoll)
     if not IsZombine(npc) or not IsValid(ragdoll) or ragdoll.HasGrenade then return end
+    if npc.HeadshotKilled or npc.IsInstantKilled then return end
     if math.random(1, 100) > ZOMBINE_GRENADE_CHANCE then return end
 
     ragdoll.HasGrenade = true
 
     timer.Simple(0.5, function()
-        if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 then return end
+        if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 or npc.HeadshotKilled or npc.IsInstantKilled then return end
 
         local handBone = ragdoll:LookupBone("ValveBiped.Bip01_R_Hand")
         if not handBone then return end
@@ -424,14 +559,14 @@ local function TryTriggerZombineGrenade(npc, ragdoll)
     end)
 end
 
--- 🧟 ZOMBIE RAGDOLL DRAGGING & SWIPING (Tuned tick rate & impulse force)
 local function StartZombieCrawlLogic(npc, ragdoll)
     if not IsValid(ragdoll) then return end
+    if npc.HeadshotKilled or npc.IsInstantKilled then return end
+
     local crawlTimer = "ZombieCrawl_" .. ragdoll:EntIndex()
     
-    -- Ticks every 0.2s instead of 0.8s for smooth, persistent dragging
-    timer.Create(crawlTimer, 0.2, 0, function()
-        if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 then
+    timer.Create(crawlTimer, 0.8, 0, function()
+        if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 or npc.HeadshotKilled or npc.IsInstantKilled then
             timer.Remove(crawlTimer)
             return
         end
@@ -465,26 +600,20 @@ local function StartZombieCrawlLogic(npc, ragdoll)
             local dir = (targetPos - ragPos):GetNormalized()
             dir.z = 0.05
 
-            -- Focus force on the pelvis phys object (center of mass)
-            local pelvisBone = ragdoll:LookupBone("ValveBiped.Bip01_Pelvis") or ragdoll:LookupBone("ValveBiped.Bip01_Spine2")
-            local pelvisPhysNum = pelvisBone and ragdoll:TranslateBoneToPhysBone(pelvisBone) or 0
-            local phys = ragdoll:GetPhysicsObjectNum(pelvisPhysNum)
+            local spineBone = ragdoll:LookupBone("ValveBiped.Bip01_Spine2") or ragdoll:LookupBone("ValveBiped.Bip01_Pelvis")
+            local spinePhysNum = spineBone and ragdoll:TranslateBoneToPhysBone(spineBone) or 0
+            local phys = ragdoll:GetPhysicsObjectNum(spinePhysNum)
 
             if IsValid(phys) then
                 local currentVel = phys:GetVelocity()
-                if currentVel:LengthSqr() < (400 * 400) then
-                    -- Strong forward impulse + vertical pop to break floor friction
-                    phys:ApplyForceCenter(dir * 9500 + Vector(0, 0, 1400))
+                if currentVel:LengthSqr() < (300 * 300) then
+                    phys:ApplyForceCenter(dir * 5000 + Vector(0, 0, 800))
                 end
             end
 
-            -- Sound throttling so audio doesn't spam every 0.2 seconds
-            if CurTime() > (ragdoll.NextDragSound or 0) then
-                ragdoll.NextDragSound = CurTime() + 0.75
-                ragdoll:EmitSound("physics/flesh/flesh_scrape_rough_ground" .. math.random(1, 2) .. ".wav", 65, math.random(90, 105))
-                if math.random(1, 3) == 1 then
-                    ragdoll:EmitSound("npc/zombie/zombie_voice_idle" .. math.random(1, 3) .. ".wav", 75, math.random(85, 100))
-                end
+            ragdoll:EmitSound("physics/flesh/flesh_scrape_rough_ground" .. math.random(1, 2) .. ".wav", 65, math.random(90, 105))
+            if math.random(1, 3) == 1 then
+                ragdoll:EmitSound("npc/zombie/zombie_voice_idle" .. math.random(1, 3) .. ".wav", 75, math.random(85, 100))
             end
 
             local dist = ragPos:Distance(targetPos)
@@ -530,14 +659,14 @@ local function StartZombieCrawlLogic(npc, ragdoll)
     end)
 end
 
--- 🏃 GENERIC HUMANOID/NPC CRAWL LOGIC
 local function StartGenericNPCCrawlLogic(npc, ragdoll)
     if not IsValid(ragdoll) then return end
+    if npc.HeadshotKilled or npc.IsInstantKilled then return end
+
     local crawlTimer = "NPCCrawl_" .. ragdoll:EntIndex()
 
-    -- Ticks every 0.25s for better responsiveness
-    timer.Create(crawlTimer, 0.25, 0, function()
-        if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 then
+    timer.Create(crawlTimer, 0.75, 0, function()
+        if not IsValid(ragdoll) or not IsValid(npc) or npc:Health() <= 0 or npc.HeadshotKilled or npc.IsInstantKilled then
             timer.Remove(crawlTimer)
             return
         end
@@ -554,8 +683,61 @@ local function StartGenericNPCCrawlLogic(npc, ragdoll)
         end
 
         local moveTargetPos = nil
+        local shouldCrawlTowardPlayer = IsHeadcrabNPC(npc) and (npc.LegsBroken or (npc.BrokenLegsCount or 0) > 0)
 
-        if npc.LegsBroken or npc:Health() < GetNPCMaxHealth(npc) then
+        if shouldCrawlTowardPlayer then
+            local closestPly = nil
+            local closestDist = 1200 * 1200
+
+            for _, ply in ipairs(player.GetAll()) do
+                if IsValid(ply) and ply:Alive() then
+                    local distSqr = ragPos:DistToSqr(ply:GetPos())
+                    if distSqr < closestDist then
+                        closestDist = distSqr
+                        closestPly = ply
+                    end
+                end
+            end
+
+            if IsValid(closestPly) then
+                moveTargetPos = closestPly:GetPos()
+            end
+        elseif npc.LegsBroken or (npc.BrokenLegsCount or 0) > 0 then
+            local threatTarget = nil
+            local threatPos = nil
+            local enemy = npc:GetEnemy()
+
+            if IsValid(enemy) then
+                threatTarget = enemy
+                threatPos = enemy:GetPos()
+            end
+
+            if not threatPos then
+                for _, ply in ipairs(player.GetAll()) do
+                    if IsValid(ply) and ply:Alive() and npc:Disposition(ply) == D_HT then
+                        threatTarget = ply
+                        threatPos = ply:GetPos()
+                        break
+                    end
+                end
+            end
+
+            if not threatPos then
+                for _, ply in ipairs(player.GetAll()) do
+                    if IsValid(ply) and ply:Alive() then
+                        threatTarget = ply
+                        threatPos = ply:GetPos()
+                        break
+                    end
+                end
+            end
+
+            if threatPos then
+                local retreatDir = (ragPos - threatPos):GetNormalized()
+                retreatDir.z = 0.05
+                moveTargetPos = ragPos + (retreatDir * 300)
+            end
+        elseif npc:Health() < GetNPCMaxHealth(npc) then
             local nearestHealth = nil
             local nearestHealthDist = 600 * 600
 
@@ -602,32 +784,29 @@ local function StartGenericNPCCrawlLogic(npc, ragdoll)
             local dir = (moveTargetPos - ragPos):GetNormalized()
             dir.z = 0.05
 
-            local pelvisBone = ragdoll:LookupBone("ValveBiped.Bip01_Pelvis") or ragdoll:LookupBone("ValveBiped.Bip01_Spine2")
-            local pelvisPhysNum = pelvisBone and ragdoll:TranslateBoneToPhysBone(pelvisBone) or 0
-            local phys = ragdoll:GetPhysicsObjectNum(pelvisPhysNum)
+            local spineBone = ragdoll:LookupBone("ValveBiped.Bip01_Spine2") or ragdoll:LookupBone("ValveBiped.Bip01_Pelvis")
+            local spinePhysNum = spineBone and ragdoll:TranslateBoneToPhysBone(spineBone) or 0
+            local phys = ragdoll:GetPhysicsObjectNum(spinePhysNum)
 
             if IsValid(phys) then
                 local currentVel = phys:GetVelocity()
-                if currentVel:LengthSqr() < (350 * 350) then
-                    phys:ApplyForceCenter(dir * 8500 + Vector(0, 0, 1200))
+                if currentVel:LengthSqr() < (250 * 250) then
+                    phys:ApplyForceCenter(dir * 4500 + Vector(0, 0, 600))
                 end
             end
 
-            if CurTime() > (ragdoll.NextDragSound or 0) then
-                ragdoll.NextDragSound = CurTime() + 0.8
-                ragdoll:EmitSound("physics/flesh/flesh_scrape_rough_ground" .. math.random(1, 2) .. ".wav", 60, math.random(95, 105))
-                if math.random(1, 3) == 1 then
-                    ragdoll:EmitSound(GetNPCPainSound(npc), 75, math.random(90, 105))
-                end
+            ragdoll:EmitSound("physics/flesh/flesh_scrape_rough_ground" .. math.random(1, 2) .. ".wav", 60, math.random(95, 105))
+            
+            if math.random(1, 3) == 1 then
+                ragdoll:EmitSound(GetNPCPainSound(npc), 75, math.random(90, 105))
             end
         end
     end)
 end
 
--- 🧍 STAND UP TRANSITION (Fixes Floor Noclipping)
 TransitionToStand = function(npc, ragdoll)
     if not IsValid(npc) then return end
-    if npc.LegsBroken then return end
+    if npc.LegsBroken or npc.HeadshotKilled or npc.IsInstantKilled then return end
 
     timer.Remove("NPC_CollapseTrack_" .. npc:EntIndex())
 
@@ -682,6 +861,8 @@ TransitionToStand = function(npc, ragdoll)
     npc:SetSolid(SOLID_BBOX)
     npc:DropToFloor()
     
+    RestoreBonemergeChildrenFromRagdoll(npc, ragdoll)
+    
     ragdoll:Remove()
 
     local startTime = CurTime()
@@ -724,8 +905,10 @@ TransitionToStand = function(npc, ragdoll)
 end
 
 local function TriggerDynamicCollapse(npc, force, hitgroup)
-    if not IsValid(npc) or npc.IsCollapsing or IsCombineMachinery(npc) then return end
+    if not IsValid(npc) or npc.IsCollapsing or npc.IsInstantKilled or npc:Health() <= 0 or IsCombineMachinery(npc) or npc.HeadshotKilled or hitgroup == HITGROUP_HEAD then return end
+    
     npc.IsCollapsing = true
+    ResetCollapseDamageStack(npc)
     npc.IsSurrendering = false
 
     if IsWeaponCapableNPC(npc) then
@@ -759,6 +942,9 @@ local function TriggerDynamicCollapse(npc, force, hitgroup)
     ragdoll.LinkedNPC = npc
     npc.LinkedRagdoll = ragdoll
 
+    -- Register death/collapse event specifically for this NPC
+    RegisterNPCDeath(npc, false, ragdoll)
+
     local appliedVelocity = npc:GetVelocity() + (force * 0.02)
     if appliedVelocity:LengthSqr() > (300 * 300) then
         appliedVelocity = appliedVelocity:GetNormalized() * 300
@@ -789,6 +975,8 @@ local function TriggerDynamicCollapse(npc, force, hitgroup)
     end
     FreezeNPC_AI(npc)
     
+    TransferBonemergeChildrenToRagdoll(npc, ragdoll)
+
     npc:SetNoDraw(true)
     npc:SetSolid(SOLID_NONE)
     npc:SetMoveType(MOVETYPE_NONE)
@@ -833,7 +1021,7 @@ local function TriggerDynamicCollapse(npc, force, hitgroup)
         if not IsHeadcrabNPC(npc) then
             local randomDelay = math.Rand(MIN_RECOVERY_TIME, MAX_RECOVERY_TIME)
             timer.Simple(randomDelay, function()
-                if IsValid(npc) and npc:Health() > 0 and IsValid(ragdoll) and SafeWaterLevel(ragdoll) < 3 then
+                if IsValid(npc) and npc:Health() > 0 and not npc.HeadshotKilled and not npc.IsInstantKilled and IsValid(ragdoll) and SafeWaterLevel(ragdoll) < 3 then
                     TransitionToStand(npc, ragdoll)
                 end
             end)
@@ -846,6 +1034,8 @@ timer.Create("DynamicCollapse_SubmergedRagdollSwimLogic", 0.1, 0, function()
     for _, ragdoll in ipairs(ents.FindByClass("prop_ragdoll")) do
         if IsValid(ragdoll) and IsValid(ragdoll.LinkedNPC) and not IsHeadcrabNPC(ragdoll.LinkedNPC) then
             local npc = ragdoll.LinkedNPC
+            if npc.HeadshotKilled or npc.IsInstantKilled then continue end
+
             local waterLevel = SafeWaterLevel(ragdoll)
 
             if waterLevel == 3 then
@@ -908,9 +1098,9 @@ timer.Create("DynamicCollapse_SubmergedRagdollSwimLogic", 0.1, 0, function()
                     ragdoll.WasSubmerged = false
                     ragdoll.SwimTargetShore = nil
 
-                    if not npc.LegsBroken then
+                    if not npc.LegsBroken and not npc.HeadshotKilled and not npc.IsInstantKilled then
                         timer.Simple(0.8, function()
-                            if IsValid(ragdoll) and IsValid(npc) and npc:Health() > 0 and SafeWaterLevel(ragdoll) < 2 then
+                            if IsValid(ragdoll) and IsValid(npc) and npc:Health() > 0 and not npc.HeadshotKilled and not npc.IsInstantKilled and SafeWaterLevel(ragdoll) < 2 then
                                 TransitionToStand(npc, ragdoll)
                             end
                         end)
@@ -927,10 +1117,11 @@ timer.Create("DynamicCollapse_SubmergedRagdollSwimLogic", 0.1, 0, function()
     end
 end)
 
--- 🏃 WEAPON & HEALTH PICKUP, METROCOP SURRENDER & OVERWATCH RETREAT
+-- 🏃 WEAPON & HEALTH PICKUP LOGIC
 timer.Create("DynamicCollapse_UnarmedAndWeaponPickupLogic", 0.6, 0, function()
     for _, npc in ipairs(ents.FindByClass("npc_*")) do
-        if IsValid(npc) and npc:IsNPC() and not npc.IsCollapsing then
+        if IsValid(npc) and npc:IsNPC() and not npc.IsCollapsing and not npc.HeadshotKilled and not npc.IsInstantKilled then
+            ApplyNPCOverhealDecay(npc)
             local npcPos = npc:GetPos()
             local maxHp = GetNPCMaxHealth(npc)
 
@@ -1061,7 +1252,7 @@ end)
 -- 🩸 OVERHEAL SLOW DECAY TIMER
 timer.Create("DynamicCollapse_OverhealDecay", 1.0, 0, function()
     for _, npc in ipairs(ents.FindByClass("npc_*")) do
-        if IsValid(npc) and npc:IsNPC() and npc:Health() > 0 then
+        if IsValid(npc) and npc:IsNPC() and npc:Health() > 0 and not npc.HeadshotKilled and not npc.IsInstantKilled then
             local maxHp = GetNPCMaxHealth(npc)
             if npc:Health() > maxHp then
                 local decayedHP = npc:Health() - 1
@@ -1106,7 +1297,7 @@ end)
 -- 🌌 REAL-TIME THINK HOOK
 hook.Add("Think", "DynamicCollapse_MainThinkLogic", function()
     for _, ent in ipairs(ents.FindByClass("npc_*")) do
-        if IsValid(ent) and ent:IsNPC() then
+        if IsValid(ent) and ent:IsNPC() and not ent.HeadshotKilled and not ent.IsInstantKilled then
             local waterLevel = SafeWaterLevel(ent)
 
             if waterLevel == 3 and not ent.IsCollapsing and not IsCombineMachinery(ent) then
@@ -1191,6 +1382,8 @@ timer.Create("DynamicCollapse_HeadcrabWaterLogic", 0.15, 0, function()
     for _, ragdoll in ipairs(ents.FindByClass("prop_ragdoll")) do
         if IsValid(ragdoll) and IsValid(ragdoll.LinkedNPC) and IsHeadcrabNPC(ragdoll.LinkedNPC) then
             local npc = ragdoll.LinkedNPC
+            if npc.HeadshotKilled or npc.IsInstantKilled then continue end
+
             local waterLvl = SafeWaterLevel(ragdoll)
             local inWater = (waterLvl > 0) or (bit.band(util.PointContents(ragdoll:WorldSpaceCenter()), CONTENTS_WATER) ~= 0)
 
@@ -1229,7 +1422,7 @@ timer.Create("DynamicCollapse_HeadcrabWaterLogic", 0.15, 0, function()
                     ragdoll.WasInWater = false
 
                     timer.Simple(1.2, function()
-                        if IsValid(ragdoll) and IsValid(npc) and npc:Health() > 0 and SafeWaterLevel(ragdoll) == 0 then
+                        if IsValid(ragdoll) and IsValid(npc) and npc:Health() > 0 and not npc.HeadshotKilled and not npc.IsInstantKilled and SafeWaterLevel(ragdoll) == 0 then
                             TransitionToStand(npc, ragdoll)
                         end
                     end)
@@ -1239,11 +1432,30 @@ timer.Create("DynamicCollapse_HeadcrabWaterLogic", 0.15, 0, function()
     end
 end)
 
--- Hook 1: Ragdoll Damage Sync
+-- Hook 1: Ragdoll Damage Sync (Guns deal 2.5x damage; Physical damage is resisted)
 hook.Add("EntityTakeDamage", "DynamicCollapse_RagdollDamageSync", function(target, dmginfo)
     if IsValid(target) and target:GetClass() == "prop_ragdoll" and IsValid(target.LinkedNPC) then
         local npc = target.LinkedNPC
-        local damage = dmginfo:GetDamage() * RAGDOLL_DAMAGE_SCALE
+
+        local hitPos = dmginfo:GetDamagePosition()
+        local headBone = target:LookupBone("ValveBiped.Bip01_Head")
+        if headBone and hitPos then
+            local headPos = target:GetBonePosition(headBone)
+            if headPos and headPos:DistToSqr(hitPos) <= (20 * 20) then
+                npc.HeadshotKilled = true
+                target.RagdollHealth = 0
+                npc:SetHealth(0)
+            end
+        end
+
+        local damageScale = RAGDOLL_GENERIC_SCALE
+        if dmginfo:IsBulletDamage() or dmginfo:IsDamageType(DMG_BULLET) or dmginfo:IsDamageType(DMG_BUCKSHOT) then
+            damageScale = RAGDOLL_GUN_DAMAGE_SCALE
+        elseif dmginfo:IsDamageType(DMG_CRUSH) or dmginfo:IsDamageType(DMG_PHYSGUN) or dmginfo:IsDamageType(DMG_CLUB) then
+            damageScale = RAGDOLL_PHYS_DAMAGE_SCALE
+        end
+
+        local damage = dmginfo:GetDamage() * damageScale
 
         if dmginfo:IsDamageType(DMG_ALWAYSGIB) then
             dmginfo:SetDamageType(bit.band(dmginfo:GetDamageType(), bit.bnot(DMG_ALWAYSGIB)))
@@ -1253,7 +1465,6 @@ hook.Add("EntityTakeDamage", "DynamicCollapse_RagdollDamageSync", function(targe
             if not npc:IsOnFire() then npc:Ignite(5) end
         end
 
-        local hitPos = dmginfo:GetDamagePosition()
         local forceDir = dmginfo:GetDamageForce()
         if hitPos and forceDir then
             local phys = target:GetPhysicsObject()
@@ -1270,7 +1481,7 @@ hook.Add("EntityTakeDamage", "DynamicCollapse_RagdollDamageSync", function(targe
         local newNPCHealth = npc:Health() - damage
         npc:SetHealth(newNPCHealth)
 
-        if target.RagdollHealth <= 0 or newNPCHealth <= 0 then
+        if target.RagdollHealth <= 0 or newNPCHealth <= 0 or npc.HeadshotKilled or npc.IsInstantKilled then
             timer.Remove("NPC_CollapseTrack_" .. npc:EntIndex())
             timer.Remove("ZombieCrawl_" .. target:EntIndex())
             timer.Remove("NPCCrawl_" .. target:EntIndex())
@@ -1292,62 +1503,71 @@ hook.Add("EntityTakeDamage", "DynamicCollapse_RagdollDamageSync", function(targe
     end
 end)
 
--- Hook 2: Leg Damage Tracking (With Damage Stacking)
+-- Hook 2: Headshot & Leg Damage Tracking (Instant 1-Shot Kills Skip Collapse)
 hook.Add("ScaleNPCDamage", "DynamicCollapse_LegShot", function(npc, hitgroup, dmginfo)
-    if not IsValid(npc) or npc.IsCollapsing or IsCombineMachinery(npc) then return end
+    if not IsValid(npc) or IsCombineMachinery(npc) then return end
+
+    -- ⚡ INSTANT 1-SHOT KILL CHECK
+    if dmginfo:GetDamage() >= npc:Health() then
+        npc.IsInstantKilled = true
+        if hitgroup == HITGROUP_HEAD then
+            npc.HeadshotKilled = true
+        end
+        RegisterNPCDeath(npc, true, nil)
+        return
+    end
+
+    if hitgroup == HITGROUP_HEAD then
+        npc.HeadshotKilled = true
+        npc.IsInstantKilled = true
+        npc.LegsBroken = true
+        RegisterNPCDeath(npc, true, nil)
+        dmginfo:SetDamage(math.max(dmginfo:GetDamage() * 10, npc:Health() + 10000))
+        return
+    end
+
+    if npc.IsCollapsing then return end
 
     if hitgroup == HITGROUP_LEFTLEG or hitgroup == HITGROUP_RIGHTLEG then
         local damage = dmginfo:GetDamage()
+        local damageStack = AddCollapseDamageStack(npc, damage)
 
-        -- Track/stack leg damage across multiple shots
-        npc.LeftLegDamage  = npc.LeftLegDamage or 0
-        npc.RightLegDamage = npc.RightLegDamage or 0
+        if damageStack >= COLLAPSE_LEG_DAMAGE then
+            if damageStack >= HEAVY_LEG_DAMAGE then
+                if hitgroup == HITGROUP_LEFTLEG then
+                    npc.LeftLegBroken = true
+                elseif hitgroup == HITGROUP_RIGHTLEG then
+                    npc.RightLegBroken = true
+                end
 
-        if hitgroup == HITGROUP_LEFTLEG then
-            npc.LeftLegDamage = npc.LeftLegDamage + damage
-        elseif hitgroup == HITGROUP_RIGHTLEG then
-            npc.RightLegDamage = npc.RightLegDamage + damage
-        end
+                local count = 0
+                if npc.LeftLegBroken then count = count + 1 end
+                if npc.RightLegBroken then count = count + 1 end
 
-        local currentLegDamage = (hitgroup == HITGROUP_LEFTLEG) and npc.LeftLegDamage or npc.RightLegDamage
+                npc.BrokenLegsCount = math.max(npc.BrokenLegsCount or 0, count)
+                if npc.BrokenLegsCount == 0 then npc.BrokenLegsCount = 1 end
+                npc.LegsBroken = true
 
-        -- Check if cumulative leg damage crosses the break threshold
-        if currentLegDamage >= HEAVY_LEG_DAMAGE then
-            local newlyBroken = false
-
-            if hitgroup == HITGROUP_LEFTLEG and not npc.LeftLegBroken then
-                npc.LeftLegBroken = true
-                newlyBroken = true
-            elseif hitgroup == HITGROUP_RIGHTLEG and not npc.RightLegBroken then
-                npc.RightLegBroken = true
-                newlyBroken = true
-            end
-
-            local count = 0
-            if npc.LeftLegBroken then count = count + 1 end
-            if npc.RightLegBroken then count = count + 1 end
-
-            npc.BrokenLegsCount = math.max(npc.BrokenLegsCount or 0, count)
-            if npc.BrokenLegsCount == 0 then npc.BrokenLegsCount = 1 end
-            npc.LegsBroken = true
-
-            if newlyBroken then
                 npc:EmitSound("physics/body/body_medium_break1.wav", 80, 90)
             end
-        end
 
-        -- Trigger collapse if shot exceeds minimum collapse threshold or leg damage is fully stacked
-        if damage >= COLLAPSE_LEG_DAMAGE or currentLegDamage >= HEAVY_LEG_DAMAGE then
             TriggerDynamicCollapse(npc, dmginfo:GetDamageForce(), hitgroup)
-            dmginfo:ScaleDamage(0.5)
         end
     end
 end)
 
--- Hook 3: Shotgun Blast Trigger
+-- Hook 3: Shotgun Blast & Instant One-Shot Damage Check
 hook.Add("EntityTakeDamage", "DynamicCollapse_ShotgunAndExplosion", function(ent, dmginfo)
     if not IsValid(ent) or IsCombineMachinery(ent) then return end
     if not (ent:IsNPC() or (ent.IsNextBot and ent:IsNextBot())) then return end
+
+    if dmginfo:GetDamage() >= ent:Health() then
+        ent.IsInstantKilled = true
+        RegisterNPCDeath(ent, true, nil)
+        return
+    end
+
+    if ent:Health() <= 0 or ent.HeadshotKilled or ent.IsInstantKilled then return end
 
     if IsZombieNPC(ent) then
         if dmginfo:IsDamageType(DMG_ALWAYSGIB) then
@@ -1358,18 +1578,44 @@ hook.Add("EntityTakeDamage", "DynamicCollapse_ShotgunAndExplosion", function(ent
         end
     end
 
+    if IsHeadcrabNPC(ent) and dmginfo:IsDamageType(DMG_ALWAYSGIB) then
+        local linkedRagdoll = ent.LinkedRagdoll
+        if IsValid(linkedRagdoll) then
+            timer.Remove("NPC_CollapseTrack_" .. ent:EntIndex())
+            timer.Remove("ZombieCrawl_" .. linkedRagdoll:EntIndex())
+            timer.Remove("NPCCrawl_" .. linkedRagdoll:EntIndex())
+            timer.Remove("ZombineBeep_" .. linkedRagdoll:EntIndex())
+            linkedRagdoll.LinkedNPC = nil
+            linkedRagdoll:Remove()
+        end
+    end
+
     if ent.IsCollapsing then return end
 
-    if dmginfo:IsDamageType(DMG_BUCKSHOT) or dmginfo:IsDamageType(DMG_GENERIC) or dmginfo:IsDamageType(DMG_BLAST) then
-        if dmginfo:GetDamage() >= COLLAPSE_SHOTGUN_DAMAGE then
+    local damageAmount = dmginfo:GetDamage()
+    local isInstantCollapse = damageAmount >= COLLAPSE_INSTANT_DAMAGE
+    local isRelevantDamage = dmginfo:IsDamageType(DMG_BUCKSHOT)
+        or dmginfo:IsDamageType(DMG_GENERIC)
+        or dmginfo:IsDamageType(DMG_BLAST)
+        or dmginfo:IsDamageType(DMG_BULLET)
+        or dmginfo:IsDamageType(DMG_SLASH)
+        or dmginfo:IsDamageType(DMG_CLUB)
+        or dmginfo:IsDamageType(DMG_CRUSH)
+
+    if isRelevantDamage then
+        local damageStack = AddCollapseDamageStack(ent, damageAmount)
+        if isInstantCollapse or damageStack >= COLLAPSE_SHOTGUN_DAMAGE then
             local subduedForce = dmginfo:GetDamageForce() * 0.005
             TriggerDynamicCollapse(ent, subduedForce)
         end
+    elseif isInstantCollapse then
+        local subduedForce = dmginfo:GetDamageForce() * 0.005
+        TriggerDynamicCollapse(ent, subduedForce)
     end
 end)
 
--- Hook 4: Remove Severed Torso Spawns
-hook.Add("OnEntityCreated", "DynamicCollapse_PreventZombieGibs", function(ent)
+-- Hook 4: Remove Severed Torso Spawns & Detached Headcrabs
+hook.Add("OnEntityCreated", "DynamicCollapse_PreventZombieGibsAndHeadcrabs", function(ent)
     timer.Simple(0, function()
         if not IsValid(ent) then return end
         local cls = string.lower(ent:GetClass() or "")
@@ -1378,5 +1624,84 @@ hook.Add("OnEntityCreated", "DynamicCollapse_PreventZombieGibs", function(ent)
             ent:Remove()
             return
         end
+
+        if string.find(cls, "headcrab") then
+            local entPos = ent:GetPos()
+            
+            for _, ragdoll in ipairs(ents.FindByClass("prop_ragdoll")) do
+                if IsValid(ragdoll) and IsValid(ragdoll.LinkedNPC) and ragdoll.LinkedNPC.IsCollapsing then
+                    if ragdoll:GetPos():DistToSqr(entPos) < (150 * 150) then
+                        local npc = ragdoll.LinkedNPC
+                        if IsValid(npc) then
+                            local model = npc:GetModel() or ""
+                            local isHeadcrabZombie = string.find(string.lower(model), "headcrab") ~= nil
+                                or string.find(string.lower(npc:GetClass() or ""), "headcrab") ~= nil
+
+                            if isHeadcrabZombie then
+                                for bodygroup = 0, npc:GetNumBodyGroups() - 1 do
+                                    local bodygroupName = string.lower(npc:GetBodyGroupName(bodygroup) or "")
+                                    if string.find(bodygroupName, "headcrab") ~= nil or string.find(bodygroupName, "head") ~= nil then
+                                        npc:SetBodygroup(bodygroup, 1)
+                                        if IsValid(ragdoll) then
+                                            ragdoll:SetBodygroup(bodygroup, 1)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        return
+                    end
+                end
+            end
+        end
     end)
+end)
+
+-- Hook 5: Targeted VJ Base Ragdoll Cleaner (ONLY affects ragdolls belonging to VJ Base NPCs)
+hook.Add("OnEntityCreated", "DynamicCollapse_PreventDuplicateRagdolls", function(ent)
+    if not IsValid(ent) or ent:GetClass() ~= "prop_ragdoll" then return end
+
+    timer.Simple(0, function()
+        if not IsValid(ent) then return end
+
+        local entModel = ent:GetModel()
+        local entPos = ent:GetPos()
+
+        -- Search specific active NPC death events
+        for idx, info in pairs(RecentNPCDeaths) do
+            -- STRICTLY apply duplicate/instant-kill ragdoll deletion to VJ Base NPCs ONLY
+            if info.isVJ and info.model == entModel and info.pos:DistToSqr(entPos) <= (150 * 150) then
+                -- 1. Instant 1-shot kill on VJ NPC: Delete extra VJ corpse
+                if info.instant then
+                    ent:Remove()
+                    return
+                end
+
+                -- 2. Duplicate ragdoll check for VJ NPCs: If this NPC already created 1 ragdoll, delete the 2nd one
+                if IsValid(info.ragdoll) and info.ragdoll ~= ent then
+                    ent:Remove()
+                    return
+                elseif not IsValid(info.ragdoll) then
+                    info.ragdoll = ent
+                end
+            end
+        end
+    end)
+end)
+
+-- Cleanup: when a ragdoll is removed ensure any transferred bonemerge children are unparented
+hook.Add("EntityRemoved", "DynamicCollapse_RagdollChildCleanup", function(ent)
+    if not IsValid(ent) then return end
+    if string.lower(ent:GetClass() or "") ~= "prop_ragdoll" then return end
+
+    for _, child in ipairs(ents.FindInSphere(ent:GetPos(), 512)) do
+        if not IsValid(child) then continue end
+        if child:IsNPC() then continue end
+        if child._DynamicCollapse_Transfered and child:GetParent() == ent then
+            child:SetParent(nil)
+            child._DynamicCollapse_Transfered = nil
+            child._DynamicCollapse_OldParent = nil
+        end
+    end
 end)
