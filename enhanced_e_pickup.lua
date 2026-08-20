@@ -7,6 +7,8 @@ if SERVER then
     util.AddNetworkString("EPickup_Distance")
 
     -- Realistic Human Carry & Reach Limits
+    local MAX_MASS = 120       -- Max weight in kg
+    local MAX_DIMENSION = 120  -- Max size dimension in units
     local MAX_REACH = 90       -- Max reach in units
     local DROP_REACH = MAX_REACH + 5
     local MIN_HOLD_DISTANCE = 45
@@ -116,6 +118,10 @@ if SERVER then
 
         local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
         local size = maxs - mins
+        if phys:GetMass() > MAX_MASS then return end
+
+        local maxDim = math.max(size.x, size.y, size.z)
+        if maxDim > MAX_DIMENSION then return end
 
         ply.EnhancedE_Ent = ent
         
