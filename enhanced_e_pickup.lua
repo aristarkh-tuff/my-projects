@@ -302,7 +302,10 @@ end
 
 if CLIENT then
     local MAX_REACH = 90
-    local enhancedPickupEnabled = GetConVar("enhancede_enabled")
+    local function IsEnhancedPickupEnabled()
+        local enabledConVar = GetConVar("enhancede_enabled")
+        return not enabledConVar or enabledConVar:GetBool()
+    end
     local heldEnt = nil
     local isRotating = false
     local attack2Down = false
@@ -336,7 +339,7 @@ if CLIENT then
     end)
 
     hook.Add("PreDrawViewModel", "EnhancedE_HideViewModel", function(vm, ply, wep)
-        if enhancedPickupEnabled:GetBool() and IsValid(heldEnt) then
+        if IsEnhancedPickupEnabled() and IsValid(heldEnt) then
             if IsValid(wep) then
                 wep:SetNoDraw(true)
             end
@@ -345,15 +348,15 @@ if CLIENT then
     end)
 
     hook.Add("PreDrawPlayerHands", "EnhancedE_HideHands", function(hands, vm, ply, wep)
-        if enhancedPickupEnabled:GetBool() and IsValid(heldEnt) then return true end
+        if IsEnhancedPickupEnabled() and IsValid(heldEnt) then return true end
     end)
 
     hook.Add("DrawPhysgunBeam", "EnhancedE_HidePhysgunBeam", function(ply, wep, enabled, target, bone, hitPos)
-        if enhancedPickupEnabled:GetBool() and IsValid(heldEnt) and ply == LocalPlayer() then return false end
+        if IsEnhancedPickupEnabled() and IsValid(heldEnt) and ply == LocalPlayer() then return false end
     end)
 
     hook.Add("PlayerBindPress", "EnhancedE_BlockWeaponSwitch", function(ply, bind, pressed)
-        if enhancedPickupEnabled:GetBool() and IsValid(heldEnt) and attack2Down then
+        if IsEnhancedPickupEnabled() and IsValid(heldEnt) and attack2Down then
             if string.find(bind, "invnext") or string.find(bind, "invprev") or string.find(bind, "slot") then
                 return true
             end
@@ -361,7 +364,7 @@ if CLIENT then
     end)
 
     hook.Add("StartCommand", "EnhancedE_StartCommand", function(ply, cmd)
-        if not enhancedPickupEnabled:GetBool() then return end
+        if not IsEnhancedPickupEnabled() then return end
         if waitAttackRelease then
             if cmd:KeyDown(IN_ATTACK) then
                 cmd:RemoveKey(IN_ATTACK)
@@ -467,7 +470,7 @@ if CLIENT then
     end)
 
     hook.Add("InputMouseApply", "EnhancedE_LockCamera", function(cmd, x, y, ang)
-        if enhancedPickupEnabled:GetBool() and IsValid(heldEnt) and isRotating then
+        if IsEnhancedPickupEnabled() and IsValid(heldEnt) and isRotating then
             if x ~= 0 or y ~= 0 then
                 net.Start("EPickup_Rotate")
                     net.WriteFloat(x)
