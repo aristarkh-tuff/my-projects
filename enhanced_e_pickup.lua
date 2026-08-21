@@ -44,7 +44,56 @@ if SERVER then
         end
     end
 
+    local function IsPropUnderPlayer(ply, propPos, propAng, mins, maxs)
+        local propMins = Vector(math.huge, math.huge, math.huge)
+        local propMaxs = Vector(-math.huge, -math.huge, -math.huge)
+        local axes = {
+            propAng:Forward(),
+            propAng:Right(),
+            propAng:Up()
+        }
+
+        for x = 0, 1 do
+            for y = 0, 1 do
+                for z = 0, 1 do
+                    local corner = Vector(
+                        x == 0 and mins.x or maxs.x,
+                        y == 0 and mins.y or maxs.y,
+                        z == 0 and mins.z or maxs.z
+                    )
+                    local worldCorner = propPos
+                        + axes[1] * corner.x
+                        + axes[2] * corner.y
+                        + axes[3] * corner.z
+
+                    propMins.x = math.min(propMins.x, worldCorner.x)
+                    propMins.y = math.min(propMins.y, worldCorner.y)
+                    propMins.z = math.min(propMins.z, worldCorner.z)
+                    propMaxs.x = math.max(propMaxs.x, worldCorner.x)
+                    propMaxs.y = math.max(propMaxs.y, worldCorner.y)
+                    propMaxs.z = math.max(propMaxs.z, worldCorner.z)
+                end
+            end
+        end
+
+        local playerMins, playerMaxs = ply:WorldSpaceAABB()
+        local propIsOverPlayer = propMaxs.x > playerMins.x
+            and propMins.x < playerMaxs.x
+            and propMaxs.y > playerMins.y
+            and propMins.y < playerMaxs.y
+        local propTopDistance = playerMins.z - propMaxs.z
+
+        local propReachesPlayer = propTopDistance >= -4
+
+        return propIsOverPlayer and propReachesPlayer
+    end
+
     local function DropProp(ply)
+        local ent = ply.EnhancedE_Ent
+        if IsValid(ent) then
+            ent:SetCustomCollisionCheck(false)
+            ent:CollisionRulesChanged()
+        end
         ply.EnhancedE_Ent = nil
         ply.EnhancedE_RelMat = nil
         ply.EnhancedE_PickupCooldown = CurTime() + 0.4
@@ -57,6 +106,8 @@ if SERVER then
     local function ThrowProp(ply)
         local ent = ply.EnhancedE_Ent
         if IsValid(ent) then
+            ent:SetCustomCollisionCheck(false)
+            ent:CollisionRulesChanged()
             local phys = ent:GetPhysicsObject()
             if IsValid(phys) then
                 local throwVel = ply:GetAimVector() * 260 + ply:GetVelocity() * 0.5
@@ -89,15 +140,30 @@ if SERVER then
     end)
 
     hook.Add("CreateEntityRagdoll", "EnhancedE_DropOnRagdoll", function(ent)
-        if ent:IsPlayer() and IsValid(ent.EnhancedE_Ent) then
+        if IsValid(ent) and ent:IsPlayer() and IsValid(ent.EnhancedE_Ent) then
             DropProp(ent)
         end
     end)
 
     hook.Add("ShouldCollide", "EnhancedE_NoHolderCollision", function(ent1, ent2)
         if not IsValid(ent1) or not IsValid(ent2) then return end
-        if ent1:IsPlayer() and ent1.EnhancedE_Ent == ent2 then return false end
-        if ent2:IsPlayer() and ent2.EnhancedE_Ent == ent1 then return false end
+        if ent1:IsPlayer() and ent1.EnhancedE_Ent == ent2 then
+            return false
+        end
+        if ent2:IsPlayer() and ent2.EnhancedE_Ent == ent1 then
+            return false
+        end
+    end)
+
+    hook.Add("EntityTakeDamage", "EnhancedE_NoHeldPropDamage", function(target, damageInfo)
+        if not target:IsPlayer() then return end
+
+        local heldEnt = target.EnhancedE_Ent
+        if not IsValid(heldEnt) then return end
+
+        if damageInfo:GetAttacker() == heldEnt or damageInfo:GetInflictor() == heldEnt then
+            return true
+        end
     end)
 
     -- Pickup Request Handler
@@ -123,6 +189,8 @@ if SERVER then
         local maxDim = math.max(size.x, size.y, size.z)
         if maxDim > MAX_DIMENSION then return end
 
+        ent:SetCustomCollisionCheck(true)
+        ent:CollisionRulesChanged()
         ply.EnhancedE_Ent = ent
         
         local plyMat = Matrix()
@@ -276,6 +344,11 @@ if SERVER then
                         - targetWorldAng:Forward() * localCenter.x
                         - targetWorldAng:Right() * localCenter.y
                         - targetWorldAng:Up() * localCenter.z
+
+                    if IsPropUnderPlayer(ply, targetPos, targetWorldAng, mins, maxs) then
+                        DropProp(ply)
+                        continue
+                    end
 
                     local shadowParams = {
                         secondstoarrive = 0.08,
