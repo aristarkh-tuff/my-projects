@@ -5,23 +5,89 @@ if SERVER then
     util.AddNetworkString("EPickup_Throw")
     util.AddNetworkString("EPickup_Rotate")
     util.AddNetworkString("EPickup_Distance")
+    util.AddNetworkString("EPickup_Settings")
+    util.AddNetworkString("EPickup_RequestSettings")
+    util.AddNetworkString("EPickup_SaveSettings")
 
     -- Realistic Human Carry & Reach Limits
     local MAX_MASS = 120       -- Max weight in kg
+    local NO_RUN_MASS = 40
     local MAX_DIMENSION = 120  -- Max size dimension in units
     local MAX_REACH = 90       -- Max reach in units
     local DROP_REACH = MAX_REACH + 5
     local MIN_HOLD_DISTANCE = 45
-    local enhancedPickupEnabled = CreateConVar("enhancede_enabled", "1", {
-        FCVAR_ARCHIVE,
-        FCVAR_NOTIFY,
-        FCVAR_REPLICATED,
-        FCVAR_SERVER_CAN_EXECUTE
-    }, "Enable the enhanced prop pickup system")
+    local SETTINGS_FILE = "enhanced_prop_pickup/settings.json"
+    local pickupSettings = {
+        enabled = true,
+        blacklist = {
+            prop_vehicle_prisoner_pod = true
+        }
+    }
+
+    file.CreateDir("enhanced_prop_pickup")
+    local savedSettings = util.JSONToTable(file.Read(SETTINGS_FILE, "DATA") or "")
+    if istable(savedSettings) then
+        if isbool(savedSettings.enabled) then
+            pickupSettings.enabled = savedSettings.enabled
+        end
+
+        if istable(savedSettings.blacklist) then
+            pickupSettings.blacklist = {}
+            for _, className in pairs(savedSettings.blacklist) do
+                if isstring(className) then
+                    pickupSettings.blacklist[className] = true
+                end
+            end
+        end
+    end
+
+    local function SavePickupSettings()
+        local blacklist = {}
+        for className in pairs(pickupSettings.blacklist) do
+            blacklist[#blacklist + 1] = className
+        end
+        table.sort(blacklist)
+        file.Write(SETTINGS_FILE, util.TableToJSON({
+            enabled = pickupSettings.enabled,
+            blacklist = blacklist
+        }, true))
+    end
+
+    local function SendPickupSettings(target)
+        local blacklist = {}
+        for className in pairs(pickupSettings.blacklist) do
+            blacklist[#blacklist + 1] = className
+        end
+        table.sort(blacklist)
+
+        net.Start("EPickup_Settings")
+            net.WriteBool(pickupSettings.enabled)
+            net.WriteUInt(#blacklist, 8)
+            for _, className in ipairs(blacklist) do
+                net.WriteString(className)
+            end
+        if target then
+            net.Send(target)
+        else
+            net.Broadcast()
+        end
+    end
+
+    local function CanEditPickupSettings(ply)
+        return game.SinglePlayer() or ply:IsAdmin()
+    end
+
+    local function IsValidBlacklistEntry(entry)
+        return isstring(entry)
+            and #entry > 0
+            and #entry <= 96
+            and (string.match(entry, "^[%w_]+$") ~= nil
+                or string.match(entry, "^models/[%w_/%-%.]+$") ~= nil)
+    end
 
     -- Disable standard engine pickup
     hook.Add("AllowPlayerPickup", "EnhancedE_DisableDefault", function(ply, ent)
-        if enhancedPickupEnabled:GetBool() then
+        if pickupSettings.enabled then
             return false
         end
     end)
@@ -42,6 +108,33 @@ if SERVER then
             wep:SetNoDraw(true)
             ply.EnhancedE_HiddenWep = wep
         end
+    end
+
+    local function RestoreCarryMovement(ply)
+        if ply.EnhancedE_BaseWalkSpeed then
+            ply:SetWalkSpeed(ply.EnhancedE_BaseWalkSpeed)
+            ply:SetRunSpeed(ply.EnhancedE_BaseRunSpeed)
+            ply.EnhancedE_BaseWalkSpeed = nil
+            ply.EnhancedE_BaseRunSpeed = nil
+        end
+        ply.EnhancedE_CarryMass = nil
+    end
+
+    local function ApplyCarryMovement(ply, mass)
+        ply.EnhancedE_BaseWalkSpeed = ply:GetWalkSpeed()
+        ply.EnhancedE_BaseRunSpeed = ply:GetRunSpeed()
+        ply.EnhancedE_CarryMass = mass
+
+        local speedScale = math.Clamp(1 - mass / (MAX_MASS * 1.5), 0.35, 1)
+        local walkSpeed = ply.EnhancedE_BaseWalkSpeed * speedScale
+        local runSpeed = ply.EnhancedE_BaseRunSpeed * speedScale
+
+        if mass > NO_RUN_MASS then
+            runSpeed = walkSpeed
+        end
+
+        ply:SetWalkSpeed(walkSpeed)
+        ply:SetRunSpeed(runSpeed)
     end
 
     local function IsPropUnderPlayer(ply, propPos, propAng, mins, maxs)
@@ -94,6 +187,7 @@ if SERVER then
             ent:SetCustomCollisionCheck(false)
             ent:CollisionRulesChanged()
         end
+        RestoreCarryMovement(ply)
         ply.EnhancedE_Ent = nil
         ply.EnhancedE_RelMat = nil
         ply.EnhancedE_PickupCooldown = CurTime() + 0.4
@@ -110,10 +204,16 @@ if SERVER then
             ent:CollisionRulesChanged()
             local phys = ent:GetPhysicsObject()
             if IsValid(phys) then
-                local throwVel = ply:GetAimVector() * 260 + ply:GetVelocity() * 0.5
+                local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
+                local size = maxs - mins
+                local massScale = math.Clamp(1 - phys:GetMass() / (MAX_MASS * 2), 0.35, 1)
+                local sizeScale = math.Clamp(1 - math.max(size.x, size.y, size.z) / (MAX_DIMENSION * 2), 0.5, 1)
+                local throwSpeed = 260 * massScale * sizeScale
+                local throwVel = ply:GetAimVector() * throwSpeed + ply:GetVelocity() * 0.5
                 phys:SetVelocity(throwVel)
                 phys:AddAngleVelocity(VectorRand() * 40)
             end
+            RestoreCarryMovement(ply)
             ply.EnhancedE_Ent = nil
             ply.EnhancedE_RelMat = nil
             ply.EnhancedE_PickupCooldown = CurTime() + 0.4
@@ -125,15 +225,46 @@ if SERVER then
         end
     end
 
-    cvars.AddChangeCallback("enhancede_enabled", function(_, _, newValue)
-        if tonumber(newValue) == 0 then
-            for _, ply in ipairs(player.GetAll()) do
-                if IsValid(ply.EnhancedE_Ent) then
-                    DropProp(ply)
+    net.Receive("EPickup_RequestSettings", function(_, ply)
+        if IsValid(ply) then
+            SendPickupSettings(ply)
+        end
+    end)
+
+    net.Receive("EPickup_SaveSettings", function(_, ply)
+        if not IsValid(ply) or not CanEditPickupSettings(ply) then return end
+
+        local enabled = net.ReadBool()
+        local blacklist = {}
+        local blacklistCount = math.min(net.ReadUInt(8), 128)
+        for _ = 1, blacklistCount do
+            local entry = string.lower(string.Trim(net.ReadString()))
+            if IsValidBlacklistEntry(entry) then
+                blacklist[entry] = true
+            end
+        end
+
+        pickupSettings.enabled = enabled
+        pickupSettings.blacklist = blacklist
+        SavePickupSettings()
+        SendPickupSettings()
+
+        if not pickupSettings.enabled then
+            for _, player in ipairs(player.GetAll()) do
+                if IsValid(player.EnhancedE_Ent) or player.EnhancedE_BaseWalkSpeed then
+                    DropProp(player)
                 end
             end
         end
-    end, "EnhancedE_Toggle")
+    end)
+
+    hook.Add("PlayerInitialSpawn", "EnhancedE_SendSettings", function(ply)
+        timer.Simple(0, function()
+            if IsValid(ply) then
+                SendPickupSettings(ply)
+            end
+        end)
+    end)
 
     hook.Add("PlayerDeath", "EnhancedE_DropOnDeath", function(ply)
         if IsValid(ply.EnhancedE_Ent) then DropProp(ply) end
@@ -161,6 +292,14 @@ if SERVER then
         local heldEnt = target.EnhancedE_Ent
         if not IsValid(heldEnt) then return end
 
+        local attacker = damageInfo:GetAttacker()
+        if IsValid(attacker)
+            and attacker:GetClass() == "npc_zombie"
+            and damageInfo:IsDamageType(DMG_SLASH) then
+            DropProp(target)
+            return
+        end
+
         if damageInfo:GetAttacker() == heldEnt or damageInfo:GetInflictor() == heldEnt then
             return true
         end
@@ -168,19 +307,33 @@ if SERVER then
 
     -- Pickup Request Handler
     net.Receive("EPickup_TryPickup", function(len, ply)
-        if not enhancedPickupEnabled:GetBool() then return end
+        if not pickupSettings.enabled then return end
         if IsValid(ply.EnhancedE_Ent) then return end
         if ply.EnhancedE_PickupCooldown and CurTime() < ply.EnhancedE_PickupCooldown then return end
 
         local ent = net.ReadEntity()
         if not IsValid(ent) then return end
-        if ent:IsWorld() or ent:IsPlayer() or ent:IsNPC() then return end
+        if ent:IsWorld() or ent:IsPlayer() then return end
+        if pickupSettings.blacklist[ent:GetClass()]
+            or pickupSettings.blacklist[string.lower(ent:GetModel() or "")] then
+            return
+        end
+        if ent:IsNPC() and ent:GetClass() ~= "npc_turret_floor" then return end
         
         -- Use NearestPoint to account for prop size, add +10 for network tolerance
         if ply:GetShootPos():Distance(ent:NearestPoint(ply:GetShootPos())) > (MAX_REACH + 10) then return end
 
         local phys = ent:GetPhysicsObject()
         if not IsValid(phys) then return end
+        if not phys:IsMoveable() then return end
+
+        if ent:GetClass() == "npc_turret_floor" then
+            local pickupAngles = ent:GetAngles()
+            pickupAngles.p = 0
+            pickupAngles.r = 0
+            ent:SetAngles(pickupAngles)
+            phys:SetAngles(pickupAngles)
+        end
 
         local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
         local size = maxs - mins
@@ -192,6 +345,7 @@ if SERVER then
         ent:SetCustomCollisionCheck(true)
         ent:CollisionRulesChanged()
         ply.EnhancedE_Ent = ent
+        ApplyCarryMovement(ply, phys:GetMass())
         
         local plyMat = Matrix()
         plyMat:SetAngles(ply:EyeAngles())
@@ -216,13 +370,13 @@ if SERVER then
 
     net.Receive("EPickup_Drop", function(len, ply) DropProp(ply) end)
     net.Receive("EPickup_Throw", function(len, ply)
-        if enhancedPickupEnabled:GetBool() then
+        if pickupSettings.enabled then
             ThrowProp(ply)
         end
     end)
 
     net.Receive("EPickup_Rotate", function(len, ply)
-        if not enhancedPickupEnabled:GetBool() then return end
+        if not pickupSettings.enabled then return end
         if not IsValid(ply.EnhancedE_Ent) then return end
         
         local eyeAng = ply:EyeAngles()
@@ -254,7 +408,7 @@ if SERVER then
     end)
 
     net.Receive("EPickup_Distance", function(len, ply)
-        if not enhancedPickupEnabled:GetBool() then return end
+        if not pickupSettings.enabled then return end
         local ent = ply.EnhancedE_Ent
         if not IsValid(ent) then return end
 
@@ -270,7 +424,7 @@ if SERVER then
     end)
 
     hook.Add("StartCommand", "EnhancedE_BlockWeaponsServer", function(ply, cmd)
-        if not enhancedPickupEnabled:GetBool() then return end
+        if not pickupSettings.enabled then return end
         if ply.EnhancedE_WaitAttackRelease then
             if cmd:KeyDown(IN_ATTACK) then
                 cmd:RemoveKey(IN_ATTACK)
@@ -288,6 +442,10 @@ if SERVER then
             cmd:RemoveKey(IN_ATTACK2)
             cmd:RemoveKey(IN_USE)
 
+            if (ply.EnhancedE_CarryMass or 0) > NO_RUN_MASS then
+                cmd:RemoveKey(IN_SPEED)
+            end
+
             local wep = ply:GetActiveWeapon()
             if IsValid(wep) then
                 wep:SetNextPrimaryFire(CurTime() + 0.1)
@@ -297,7 +455,7 @@ if SERVER then
     end)
 
     hook.Add("Tick", "EnhancedE_PhysicsTick", function()
-        if not enhancedPickupEnabled:GetBool() then return end
+        if not pickupSettings.enabled then return end
         for _, ply in ipairs(player.GetAll()) do
             local ent = ply.EnhancedE_Ent
             if IsValid(ent) then
@@ -381,9 +539,24 @@ end
 
 if CLIENT then
     local MAX_REACH = 90
+    local pickupEnabled = true
+    local pickupBlacklist = {}
+
+    net.Receive("EPickup_Settings", function()
+        pickupEnabled = net.ReadBool()
+        pickupBlacklist = {}
+        for _ = 1, net.ReadUInt(8) do
+            pickupBlacklist[net.ReadString()] = true
+        end
+    end)
+
+    hook.Add("InitPostEntity", "EnhancedE_RequestSettings", function()
+        net.Start("EPickup_RequestSettings")
+        net.SendToServer()
+    end)
+
     local function IsEnhancedPickupEnabled()
-        local enabledConVar = GetConVar("enhancede_enabled")
-        return not enabledConVar or enabledConVar:GetBool()
+        return pickupEnabled
     end
     local heldEnt = nil
     local isRotating = false
@@ -473,7 +646,8 @@ if CLIENT then
                 local ent = tr.Entity
                 
                 -- Removed unreliable client-side physics check here so it works instantly after restarts
-                if IsValid(ent) and not ent:IsWorld() and not ent:IsPlayer() and not ent:IsNPC() then
+                if IsValid(ent) and not ent:IsWorld() and not ent:IsPlayer()
+                    and (not ent:IsNPC() or ent:GetClass() == "npc_turret_floor") then
                     if tr.HitPos:Distance(ply:GetShootPos()) <= MAX_REACH then
                         cmd:RemoveKey(IN_USE)
                         net.Start("EPickup_TryPickup")
@@ -562,4 +736,79 @@ if CLIENT then
             return true
         end
     end)
+
+    local function SavePickupSettings(enabled, blacklist)
+        local classNames = {}
+        for className in pairs(blacklist) do
+            classNames[#classNames + 1] = className
+        end
+        table.sort(classNames)
+
+        net.Start("EPickup_SaveSettings")
+            net.WriteBool(enabled)
+            net.WriteUInt(math.min(#classNames, 128), 8)
+            for index = 1, math.min(#classNames, 128) do
+                net.WriteString(classNames[index])
+            end
+        net.SendToServer()
+    end
+
+    hook.Add("PopulateToolMenu", "EnhancedE_PopulateOptions", function()
+        spawnmenu.AddToolMenuOption("Options", "Enhanced Prop Pickup", "Enhanced Prop Pickup",
+            "Enhanced Prop Pickup", "", "", function(panel)
+            panel:ClearControls()
+
+            local canEdit = game.SinglePlayer() or LocalPlayer():IsAdmin()
+            panel:Help(canEdit and "Enhanced prop pickup settings" or "Only server admins can edit these settings")
+
+            local enabledCheck = panel:CheckBox("Enable enhanced prop pickup")
+            enabledCheck:SetValue(pickupEnabled and 1 or 0)
+            enabledCheck:SetEnabled(canEdit)
+            enabledCheck.OnChange = function(_, value)
+                if canEdit then
+                    pickupEnabled = value
+                    SavePickupSettings(pickupEnabled, pickupBlacklist)
+                end
+            end
+
+            panel:Help("Add an entity class or model path to block it from pickup")
+            local blacklistList = vgui.Create("DListView")
+            blacklistList:AddColumn("Entity class or model")
+            blacklistList:SetTall(160)
+            for className in pairs(pickupBlacklist) do
+                blacklistList:AddLine(className)
+            end
+            panel:AddItem(blacklistList)
+
+            local classEntry = panel:TextEntry("Entity class or model path")
+            classEntry:SetEnabled(canEdit)
+
+            local addButton = panel:Button("Add to blacklist")
+            addButton:SetEnabled(canEdit)
+            addButton.DoClick = function()
+                local className = string.lower(string.Trim(classEntry:GetValue()))
+                local isClass = string.match(className, "^[%w_]+$") ~= nil
+                local isModel = string.match(className, "^models/[%w_/%-%.]+$") ~= nil
+                if not isClass and not isModel then return end
+                if pickupBlacklist[className] then return end
+
+                pickupBlacklist[className] = true
+                blacklistList:AddLine(className)
+                classEntry:SetValue("")
+                SavePickupSettings(pickupEnabled, pickupBlacklist)
+            end
+
+            local removeButton = panel:Button("Remove selected")
+            removeButton:SetEnabled(canEdit)
+            removeButton.DoClick = function()
+                local selected = blacklistList:GetSelected()[1]
+                if not IsValid(selected) then return end
+
+                local className = selected:GetValue(1)
+                pickupBlacklist[className] = nil
+                blacklistList:RemoveLine(selected:GetID())
+                SavePickupSettings(pickupEnabled, pickupBlacklist)
+            end
+            end)
+        end)
 end
