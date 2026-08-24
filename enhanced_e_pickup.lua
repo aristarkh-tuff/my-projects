@@ -508,15 +508,16 @@ if SERVER then
                         continue
                     end
 
+                    local isRagdoll = ent:GetClass() == "prop_ragdoll"
                     local shadowParams = {
-                        secondstoarrive = 0.08,
+                        secondstoarrive = isRagdoll and 0.18 or 0.08,
                         pos = targetPos,
                         angle = targetWorldAng,
-                        maxangular = 1000,
-                        maxangulardamp = 10000,
-                        maxspeed = 800,
-                        maxspeeddamp = 1000,
-                        dampfactor = 0.8,
+                        maxangular = isRagdoll and 350 or 1000,
+                        maxangulardamp = isRagdoll and 3000 or 10000,
+                        maxspeed = isRagdoll and 500 or 800,
+                        maxspeeddamp = isRagdoll and 700 or 1000,
+                        dampfactor = isRagdoll and 0.92 or 0.8,
                         teleportdistance = 0,
                         deltatime = engine.TickInterval()
                     }
