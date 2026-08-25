@@ -3,6 +3,8 @@ if SERVER then
     util.AddNetworkString("EPickup_TryPickup")
     util.AddNetworkString("EPickup_Drop")
     util.AddNetworkString("EPickup_Throw")
+    util.AddNetworkString("EPickup_IgniteFlare")
+    util.AddNetworkString("EPickup_ToggleUnweld")
     util.AddNetworkString("EPickup_Rotate")
     util.AddNetworkString("EPickup_Distance")
     util.AddNetworkString("EPickup_Settings")
@@ -13,12 +15,15 @@ if SERVER then
     local MAX_MASS = 120       -- Max weight in kg
     local NO_RUN_MASS = 40
     local MAX_DIMENSION = 120  -- Max size dimension in units
+    local MAX_THROW_DIMENSION = 40 -- Props larger than this can be dropped, not thrown
     local MAX_REACH = 90       -- Max reach in units
     local DROP_REACH = MAX_REACH + 5
     local MIN_HOLD_DISTANCE = 45
     local SETTINGS_FILE = "enhanced_prop_pickup/settings.json"
     local pickupSettings = {
         enabled = true,
+        unweldEnabled = true,
+        staticPropPickupEnabled = false,
         blacklist = {
             prop_vehicle_prisoner_pod = true
         }
@@ -29,6 +34,12 @@ if SERVER then
     if istable(savedSettings) then
         if isbool(savedSettings.enabled) then
             pickupSettings.enabled = savedSettings.enabled
+        end
+        if isbool(savedSettings.unweldEnabled) then
+            pickupSettings.unweldEnabled = savedSettings.unweldEnabled
+        end
+        if isbool(savedSettings.staticPropPickupEnabled) then
+            pickupSettings.staticPropPickupEnabled = savedSettings.staticPropPickupEnabled
         end
 
         if istable(savedSettings.blacklist) then
@@ -49,6 +60,8 @@ if SERVER then
         table.sort(blacklist)
         file.Write(SETTINGS_FILE, util.TableToJSON({
             enabled = pickupSettings.enabled,
+            unweldEnabled = pickupSettings.unweldEnabled,
+            staticPropPickupEnabled = pickupSettings.staticPropPickupEnabled,
             blacklist = blacklist
         }, true))
     end
@@ -62,6 +75,8 @@ if SERVER then
 
         net.Start("EPickup_Settings")
             net.WriteBool(pickupSettings.enabled)
+            net.WriteBool(pickupSettings.unweldEnabled)
+            net.WriteBool(pickupSettings.staticPropPickupEnabled)
             net.WriteUInt(#blacklist, 8)
             for _, className in ipairs(blacklist) do
                 net.WriteString(className)
@@ -84,6 +99,123 @@ if SERVER then
             and (string.match(entry, "^[%w_]+$") ~= nil
                 or string.match(entry, "^models/[%w_/%-%.]+$") ~= nil)
     end
+
+    local function IsConvertibleDebris(ent)
+        local className = string.lower(ent:GetClass() or "")
+        local model = string.lower(ent:GetModel() or "")
+        local isDebris = string.find(className, "gib", 1, true) ~= nil
+            or string.find(className, "debris", 1, true) ~= nil
+            or string.find(model, "gib", 1, true) ~= nil
+            or string.find(model, "debris", 1, true) ~= nil
+        local isNonPhysicsFlare = string.find(model, "flare", 1, true) ~= nil
+            and className ~= "prop_physics"
+            and className ~= "prop_physics_multiplayer"
+
+        return isDebris or isNonPhysicsFlare
+    end
+
+    local function IsStaticProp(ent)
+        local className = string.lower(ent:GetClass() or "")
+        return className == "prop_static"
+            or className == "func_detail"
+            or ent:GetMoveType() == MOVETYPE_NONE
+    end
+
+    local function ConvertToPhysicsProp(ent)
+        if not IsValid(ent) or ent.EnhancedE_Converted then return end
+
+        local model = ent:GetModel()
+        if not isstring(model) or model == "" or not util.IsValidModel(model) then return end
+
+        local position = ent:GetPos()
+        local angles = ent:GetAngles()
+        local velocity = ent:GetVelocity()
+        local oldPhys = ent:GetPhysicsObject()
+        local angularVelocity = IsValid(oldPhys) and oldPhys:GetAngleVelocity() or vector_origin
+        local wasOnFire = ent:IsOnFire()
+        local replacement = ents.Create("prop_physics")
+        if not IsValid(replacement) then return end
+
+        replacement.EnhancedE_Converted = true
+        replacement:SetModel(model)
+        replacement:SetPos(position)
+        replacement:SetAngles(angles)
+        replacement:Spawn()
+        replacement:Activate()
+        replacement:SetSkin(ent:GetSkin() or 0)
+        replacement:SetColor(ent:GetColor())
+
+        local phys = replacement:GetPhysicsObject()
+        if not IsValid(phys) then
+            replacement:Remove()
+            return
+        end
+
+        phys:SetVelocity(velocity)
+        phys:AddAngleVelocity(angularVelocity)
+        if wasOnFire then
+            replacement:Ignite(30)
+        end
+
+        ent:Remove()
+    end
+
+    local function GetPhysicsEntity(ent)
+        if not IsValid(ent) then return nil end
+
+        local phys = ent:GetPhysicsObject()
+        if IsValid(phys) then return ent end
+
+        local model = ent:GetModel()
+        if not isstring(model) or model == "" or not util.IsValidModel(model) then return nil end
+        local isFlare = string.find(string.lower(model), "flare", 1, true) ~= nil
+        if ent:IsPlayer() or ent:IsNPC() or (ent:IsWeapon() and not isFlare) then return nil end
+        if IsStaticProp(ent) and not pickupSettings.staticPropPickupEnabled and not isFlare then return nil end
+
+        local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
+        local size = maxs - mins
+        if math.max(size.x, size.y, size.z) > MAX_DIMENSION then return nil end
+
+        local position = ent:GetPos()
+        local angles = ent:GetAngles()
+        local velocity = ent:GetVelocity()
+        local oldPhys = ent:GetPhysicsObject()
+        local angularVelocity = IsValid(oldPhys) and oldPhys:GetAngleVelocity() or vector_origin
+        local wasOnFire = ent:IsOnFire()
+        local replacement = ents.Create("prop_physics")
+        if not IsValid(replacement) then return nil end
+
+        replacement.EnhancedE_Converted = true
+        replacement:SetModel(model)
+        replacement:SetPos(position)
+        replacement:SetAngles(angles)
+        replacement:Spawn()
+        replacement:Activate()
+        replacement:SetSkin(ent:GetSkin() or 0)
+        replacement:SetColor(ent:GetColor())
+        replacement:SetCollisionGroup(COLLISION_GROUP_NONE)
+
+        local replacementPhys = replacement:GetPhysicsObject()
+        if not IsValid(replacementPhys) then
+            replacement:Remove()
+            return nil
+        end
+
+        replacementPhys:SetVelocity(velocity)
+        replacementPhys:AddAngleVelocity(angularVelocity)
+        replacementPhys:EnableGravity(true)
+        if wasOnFire then replacement:Ignite(30) end
+        ent:Remove()
+        return replacement
+    end
+
+    hook.Add("OnEntityCreated", "EnhancedE_ConvertDebris", function(ent)
+        timer.Simple(0, function()
+            if IsValid(ent) and IsConvertibleDebris(ent) then
+                ConvertToPhysicsProp(ent)
+            end
+        end)
+    end)
 
     -- Disable standard engine pickup
     hook.Add("AllowPlayerPickup", "EnhancedE_DisableDefault", function(ply, ent)
@@ -197,7 +329,7 @@ if SERVER then
         net.Send(ply)
     end
 
-    local function ThrowProp(ply)
+    local function ThrowProp(ply, charge)
         local ent = ply.EnhancedE_Ent
         if IsValid(ent) then
             ent:SetCustomCollisionCheck(false)
@@ -206,12 +338,16 @@ if SERVER then
             if IsValid(phys) then
                 local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
                 local size = maxs - mins
-                local massScale = math.Clamp(1 - phys:GetMass() / (MAX_MASS * 2), 0.35, 1)
-                local sizeScale = math.Clamp(1 - math.max(size.x, size.y, size.z) / (MAX_DIMENSION * 2), 0.5, 1)
-                local throwSpeed = 260 * massScale * sizeScale
-                local throwVel = ply:GetAimVector() * throwSpeed + ply:GetVelocity() * 0.5
-                phys:SetVelocity(throwVel)
-                phys:AddAngleVelocity(VectorRand() * 40)
+                local maxDim = math.max(size.x, size.y, size.z)
+                if maxDim <= MAX_THROW_DIMENSION then
+                    local massScale = math.Clamp(1 - phys:GetMass() / (MAX_MASS * 2), 0.35, 1)
+                    local sizeScale = math.Clamp(1 - maxDim / (MAX_DIMENSION * 2), 0.5, 1)
+                    local throwScale = 1 + math.Clamp(tonumber(charge) or 0, 0, 1) * 2.2
+                    local throwSpeed = 260 * throwScale * massScale * sizeScale
+                    local throwVel = ply:GetAimVector() * throwSpeed + ply:GetVelocity() * 0.5
+                    phys:SetVelocity(throwVel)
+                    phys:AddAngleVelocity(VectorRand() * 40)
+                end
             end
             RestoreCarryMovement(ply)
             ply.EnhancedE_Ent = nil
@@ -235,6 +371,8 @@ if SERVER then
         if not IsValid(ply) or not CanEditPickupSettings(ply) then return end
 
         local enabled = net.ReadBool()
+        local unweldEnabled = net.ReadBool()
+        local staticPropPickupEnabled = net.ReadBool()
         local blacklist = {}
         local blacklistCount = math.min(net.ReadUInt(8), 128)
         for _ = 1, blacklistCount do
@@ -245,6 +383,8 @@ if SERVER then
         end
 
         pickupSettings.enabled = enabled
+        pickupSettings.unweldEnabled = unweldEnabled
+        pickupSettings.staticPropPickupEnabled = staticPropPickupEnabled
         pickupSettings.blacklist = blacklist
         SavePickupSettings()
         SendPickupSettings()
@@ -308,6 +448,7 @@ if SERVER then
     -- Pickup Request Handler
     net.Receive("EPickup_TryPickup", function(len, ply)
         if not pickupSettings.enabled then return end
+        if ply:InVehicle() then return end
         if IsValid(ply.EnhancedE_Ent) then return end
         if ply.EnhancedE_PickupCooldown and CurTime() < ply.EnhancedE_PickupCooldown then return end
 
@@ -319,13 +460,18 @@ if SERVER then
             return
         end
         if ent:IsNPC() and ent:GetClass() ~= "npc_turret_floor" then return end
+
+        ent = GetPhysicsEntity(ent)
+        if not IsValid(ent) then return end
         
         -- Use NearestPoint to account for prop size, add +10 for network tolerance
         if ply:GetShootPos():Distance(ent:NearestPoint(ply:GetShootPos())) > (MAX_REACH + 10) then return end
 
         local phys = ent:GetPhysicsObject()
-        if not IsValid(phys) then return end
-        if not phys:IsMoveable() then return end
+        local isStatic = IsStaticProp(ent)
+        if not phys:IsMoveable() then
+            if not isStatic or not pickupSettings.staticPropPickupEnabled then return end
+        end
 
         if ent:GetClass() == "npc_turret_floor" then
             local pickupAngles = ent:GetAngles()
@@ -342,8 +488,18 @@ if SERVER then
         local maxDim = math.max(size.x, size.y, size.z)
         if maxDim > MAX_DIMENSION then return end
 
+        if not phys:IsMoveable() then
+            phys:EnableMotion(true)
+            phys:Wake()
+        end
+
         ent:SetCustomCollisionCheck(true)
+        ent:SetCollisionGroup(COLLISION_GROUP_NONE)
         ent:CollisionRulesChanged()
+        phys:EnableGravity(true)
+        if string.find(string.lower(ent:GetModel() or ""), "flare", 1, true) then
+            ent:Extinguish()
+        end
         ply.EnhancedE_Ent = ent
         ApplyCarryMovement(ply, phys:GetMass())
         
@@ -371,7 +527,29 @@ if SERVER then
     net.Receive("EPickup_Drop", function(len, ply) DropProp(ply) end)
     net.Receive("EPickup_Throw", function(len, ply)
         if pickupSettings.enabled then
-            ThrowProp(ply)
+            ThrowProp(ply, len >= 32 and net.ReadFloat() or 0)
+        end
+    end)
+
+    net.Receive("EPickup_IgniteFlare", function(_, ply)
+        if not pickupSettings.enabled then return end
+
+        local ent = ply.EnhancedE_Ent
+        if IsValid(ent) and string.find(string.lower(ent:GetModel() or ""), "flare", 1, true) then
+            ent:Ignite(30)
+        end
+    end)
+
+    net.Receive("EPickup_ToggleUnweld", function(_, ply)
+        if not pickupSettings.enabled or not pickupSettings.unweldEnabled then return end
+
+        local ent = ply.EnhancedE_Ent
+        if not IsValid(ent) then return end
+
+        constraint.RemoveAll(ent)
+        local phys = ent:GetPhysicsObject()
+        if IsValid(phys) then
+            phys:EnableGravity(true)
         end
     end)
 
@@ -540,11 +718,16 @@ end
 
 if CLIENT then
     local MAX_REACH = 90
+    local MAX_THROW_DIMENSION = 40
     local pickupEnabled = true
+    local unweldEnabled = true
+    local staticPropPickupEnabled = false
     local pickupBlacklist = {}
 
     net.Receive("EPickup_Settings", function()
         pickupEnabled = net.ReadBool()
+        unweldEnabled = net.ReadBool()
+        staticPropPickupEnabled = net.ReadBool()
         pickupBlacklist = {}
         for _ = 1, net.ReadUInt(8) do
             pickupBlacklist[net.ReadString()] = true
@@ -563,7 +746,12 @@ if CLIENT then
     local isRotating = false
     local attack2Down = false
     local useDown = false
+    local reloadDown = false
     local waitAttackRelease = false
+        local attackDown = false
+        local attackChargeStart = 0
+        local attackCharging = false
+        local flareIgnited = false
     local pressTime = 0
     local pickupCooldown = 0
     local targetLockedAng = Angle(0, 0, 0)
@@ -586,6 +774,10 @@ if CLIENT then
             isRotating = false
             attack2Down = false
             useDown = false
+            reloadDown = false
+            attackDown = false
+            attackCharging = false
+            flareIgnited = false
             pickupCooldown = CurTime() + 0.4
             RestoreClientWeapon()
         end
@@ -666,17 +858,57 @@ if CLIENT then
 
         cmd:RemoveKey(IN_USE)
 
-        if cmd:KeyDown(IN_ATTACK) then
+        local isReload = cmd:KeyDown(IN_RELOAD)
+        if isReload and not reloadDown then
+            reloadDown = true
+            if unweldEnabled then
+                cmd:RemoveKey(IN_RELOAD)
+                net.Start("EPickup_ToggleUnweld")
+                net.SendToServer()
+            end
+        elseif not isReload then
+            reloadDown = false
+        end
+
+            local isAttack = cmd:KeyDown(IN_ATTACK)
+            if isAttack and not attackDown then
+                attackDown = true
+                attackChargeStart = CurTime()
+                attackCharging = false
+                flareIgnited = false
+            end
+
+            if isAttack then
             cmd:RemoveKey(IN_ATTACK)
-            net.Start("EPickup_Throw")
-            net.SendToServer()
-            heldEnt = nil
-            isRotating = false
-            attack2Down = false
-            waitAttackRelease = true
-            pickupCooldown = CurTime() + 0.4
-            RestoreClientWeapon()
-            return
+                local heldFor = CurTime() - attackChargeStart
+                if heldFor >= HOLD_THRESHOLD then
+                    attackCharging = true
+                    if string.find(string.lower(heldEnt:GetModel() or ""), "flare", 1, true) and not flareIgnited then
+                        flareIgnited = true
+                        net.Start("EPickup_IgniteFlare")
+                        net.SendToServer()
+                    end
+                end
+            elseif attackDown then
+                local heldFor = CurTime() - attackChargeStart
+                local charge = 0
+                if attackCharging and not string.find(string.lower(heldEnt:GetModel() or ""), "flare", 1, true) then
+                    charge = math.Clamp((heldFor - HOLD_THRESHOLD) / 1, 0, 1)
+                end
+
+                attackDown = false
+                attackCharging = false
+                flareIgnited = false
+                net.Start("EPickup_Throw")
+                    net.WriteFloat(charge)
+                net.SendToServer()
+                heldEnt = nil
+                isRotating = false
+                attack2Down = false
+                waitAttackRelease = true
+                pickupCooldown = CurTime() + 0.4
+                RestoreClientWeapon()
+                return
         end
 
         local isAttack2 = cmd:KeyDown(IN_ATTACK2)
@@ -738,7 +970,26 @@ if CLIENT then
         end
     end)
 
-    local function SavePickupSettings(enabled, blacklist)
+        hook.Add("HUDPaint", "EnhancedE_ThrowCharge", function()
+            if not IsEnhancedPickupEnabled() or not IsValid(heldEnt) or not attackCharging then return end
+            if string.find(string.lower(heldEnt:GetModel() or ""), "flare", 1, true) then return end
+
+            local mins, maxs = heldEnt:OBBMins(), heldEnt:OBBMaxs()
+            local size = maxs - mins
+            if math.max(size.x, size.y, size.z) > MAX_THROW_DIMENSION then return end
+
+            local charge = math.Clamp((CurTime() - attackChargeStart - HOLD_THRESHOLD) / 1, 0, 1)
+            local width, height = 260, 22
+            local x, y = (ScrW() - width) * 0.5, ScrH() - 110
+            local color = Color(255, 210 - 210 * charge, 0, 255)
+            surface.SetDrawColor(20, 20, 20, 220)
+            surface.DrawRect(x - 3, y - 3, width + 6, height + 6)
+            surface.SetDrawColor(color)
+            surface.DrawRect(x, y, width * charge, height)
+            draw.SimpleText("THROW POWER", "DermaDefaultBold", ScrW() * 0.5, y - 18, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+        end)
+
+    local function SavePickupSettings(enabled, unweld, staticProps, blacklist)
         local classNames = {}
         for className in pairs(blacklist) do
             classNames[#classNames + 1] = className
@@ -747,6 +998,8 @@ if CLIENT then
 
         net.Start("EPickup_SaveSettings")
             net.WriteBool(enabled)
+            net.WriteBool(unweld)
+            net.WriteBool(staticProps)
             net.WriteUInt(math.min(#classNames, 128), 8)
             for index = 1, math.min(#classNames, 128) do
                 net.WriteString(classNames[index])
@@ -768,7 +1021,27 @@ if CLIENT then
             enabledCheck.OnChange = function(_, value)
                 if canEdit then
                     pickupEnabled = value
-                    SavePickupSettings(pickupEnabled, pickupBlacklist)
+                    SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
+                end
+            end
+
+            local unweldCheck = panel:CheckBox("Allow reload key to unweld held props")
+            unweldCheck:SetValue(unweldEnabled and 1 or 0)
+            unweldCheck:SetEnabled(canEdit)
+            unweldCheck.OnChange = function(_, value)
+                if canEdit then
+                    unweldEnabled = value
+                    SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
+                end
+            end
+
+            local staticPropCheck = panel:CheckBox("Allow pickup of frozen map props")
+            staticPropCheck:SetValue(staticPropPickupEnabled and 1 or 0)
+            staticPropCheck:SetEnabled(canEdit)
+            staticPropCheck.OnChange = function(_, value)
+                if canEdit then
+                    staticPropPickupEnabled = value
+                    SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
                 end
             end
 
@@ -796,7 +1069,7 @@ if CLIENT then
                 pickupBlacklist[className] = true
                 blacklistList:AddLine(className)
                 classEntry:SetValue("")
-                SavePickupSettings(pickupEnabled, pickupBlacklist)
+                SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
             end
 
             local removeButton = panel:Button("Remove selected")
@@ -808,7 +1081,7 @@ if CLIENT then
                 local className = selected:GetValue(1)
                 pickupBlacklist[className] = nil
                 blacklistList:RemoveLine(selected:GetID())
-                SavePickupSettings(pickupEnabled, pickupBlacklist)
+                SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
             end
             end)
         end)
