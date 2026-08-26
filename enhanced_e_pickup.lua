@@ -103,6 +103,7 @@ if SERVER then
     local function IsConvertibleDebris(ent)
         local className = string.lower(ent:GetClass() or "")
         local model = string.lower(ent:GetModel() or "")
+        if className == "prop_static" or className == "func_detail" then return false end
         local isDebris = string.find(className, "gib", 1, true) ~= nil
             or string.find(className, "debris", 1, true) ~= nil
             or string.find(model, "gib", 1, true) ~= nil
@@ -164,7 +165,14 @@ if SERVER then
         if not IsValid(ent) then return nil end
 
         local phys = ent:GetPhysicsObject()
-        if IsValid(phys) then return ent end
+        if IsValid(phys) then
+            if not phys:IsMoveable()
+                and IsStaticProp(ent)
+                and not pickupSettings.staticPropPickupEnabled then
+                return nil
+            end
+            return ent
+        end
 
         local model = ent:GetModel()
         if not isstring(model) or model == "" or not util.IsValidModel(model) then return nil end
