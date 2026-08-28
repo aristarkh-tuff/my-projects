@@ -121,6 +121,36 @@ if SERVER then
             or ent:GetMoveType() == MOVETYPE_NONE
     end
 
+      local function IsConvertibleDebris(ent)
+        local className = string.lower(ent:GetClass() or "")
+        local model = string.lower(ent:GetModel() or "")
+        if className == "prop_static" or className == "func_detail" then return false end
+        if ent:IsNPC() or ent:IsWeapon() then return false end
+        if string.find(className, "headcrab", 1, true)
+            or string.find(className, "zombie", 1, true)
+            or string.find(model, "headcrab", 1, true)
+            or string.find(model, "zombie", 1, true) then
+            return false
+        end
+        local isDebris = string.find(className, "gib", 1, true) ~= nil
+            or string.find(className, "debris", 1, true) ~= nil
+            or string.find(model, "gib", 1, true) ~= nil
+            or string.find(model, "debris", 1, true) ~= nil
+            or ent:GetCollisionGroup() == COLLISION_GROUP_DEBRIS
+        local isNonPhysicsFlare = string.find(model, "flare", 1, true) ~= nil
+            and className ~= "prop_physics"
+            and className ~= "prop_physics_multiplayer"
+
+        return isDebris or isNonPhysicsFlare
+    end
+
+    local function IsStaticProp(ent)
+        local className = string.lower(ent:GetClass() or "")
+        return className == "prop_static"
+            or className == "func_detail"
+            or ent:GetMoveType() == MOVETYPE_NONE
+    end
+
     local function ConvertToPhysicsProp(ent)
         if not IsValid(ent) or ent.EnhancedE_Converted then return end
 
@@ -165,19 +195,20 @@ if SERVER then
 
         local phys = ent:GetPhysicsObject()
         if IsValid(phys) then
-            if not phys:IsMoveable()
-                and IsStaticProp(ent)
-                and not pickupSettings.staticPropPickupEnabled then
-                return nil
-            end
+            if not phys:IsMoveable() then return nil end
             return ent
         end
 
         local model = ent:GetModel()
         if not isstring(model) or model == "" or not util.IsValidModel(model) then return nil end
         local isFlare = string.find(string.lower(model), "flare", 1, true) ~= nil
+        local lowerModel = string.lower(model)
+        if string.find(lowerModel, "headcrab", 1, true)
+            or string.find(lowerModel, "zombie", 1, true) then
+            return nil
+        end
         if ent:IsPlayer() or ent:IsNPC() or (ent:IsWeapon() and not isFlare) then return nil end
-        if IsStaticProp(ent) and not pickupSettings.staticPropPickupEnabled and not isFlare then return nil end
+        if IsStaticProp(ent) and not isFlare then return nil end
 
         local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
         local size = maxs - mins
@@ -216,12 +247,15 @@ if SERVER then
         return replacement
     end
 
+
     hook.Add("OnEntityCreated", "EnhancedE_ConvertDebris", function(ent)
-        timer.Simple(0, function()
-            if IsValid(ent) and IsConvertibleDebris(ent) then
-                ConvertToPhysicsProp(ent)
-            end
-        end)
+        for attempt = 0, 4 do
+            timer.Simple(attempt * 0.1, function()
+                if IsValid(ent) and IsConvertibleDebris(ent) then
+                    ConvertToPhysicsProp(ent)
+                end
+            end)
+        end
     end)
 
     -- Disable standard engine pickup
