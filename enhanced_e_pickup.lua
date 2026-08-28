@@ -4,7 +4,6 @@ if SERVER then
     util.AddNetworkString("EPickup_Drop")
     util.AddNetworkString("EPickup_Throw")
     util.AddNetworkString("EPickup_IgniteFlare")
-    util.AddNetworkString("EPickup_ToggleUnweld")
     util.AddNetworkString("EPickup_Rotate")
     util.AddNetworkString("EPickup_Distance")
     util.AddNetworkString("EPickup_Settings")
@@ -496,11 +495,6 @@ if SERVER then
         local maxDim = math.max(size.x, size.y, size.z)
         if maxDim > MAX_DIMENSION then return end
 
-        if not phys:IsMoveable() then
-            phys:EnableMotion(true)
-            phys:Wake()
-        end
-
         ent:SetCustomCollisionCheck(true)
         ent:SetCollisionGroup(COLLISION_GROUP_NONE)
         ent:CollisionRulesChanged()
@@ -545,19 +539,6 @@ if SERVER then
         local ent = ply.EnhancedE_Ent
         if IsValid(ent) and string.find(string.lower(ent:GetModel() or ""), "flare", 1, true) then
             ent:Ignite(30)
-        end
-    end)
-
-    net.Receive("EPickup_ToggleUnweld", function(_, ply)
-        if not pickupSettings.enabled or not pickupSettings.unweldEnabled then return end
-
-        local ent = ply.EnhancedE_Ent
-        if not IsValid(ent) then return end
-
-        constraint.RemoveAll(ent)
-        local phys = ent:GetPhysicsObject()
-        if IsValid(phys) then
-            phys:EnableGravity(true)
         end
     end)
 
@@ -866,17 +847,6 @@ if CLIENT then
 
         cmd:RemoveKey(IN_USE)
 
-        local isReload = cmd:KeyDown(IN_RELOAD)
-        if isReload and not reloadDown then
-            reloadDown = true
-            if unweldEnabled then
-                cmd:RemoveKey(IN_RELOAD)
-                net.Start("EPickup_ToggleUnweld")
-                net.SendToServer()
-            end
-        elseif not isReload then
-            reloadDown = false
-        end
 
             local isAttack = cmd:KeyDown(IN_ATTACK)
             if isAttack and not attackDown then
@@ -1029,26 +999,6 @@ if CLIENT then
             enabledCheck.OnChange = function(_, value)
                 if canEdit then
                     pickupEnabled = value
-                    SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
-                end
-            end
-
-            local unweldCheck = panel:CheckBox("Allow reload key to unweld held props")
-            unweldCheck:SetValue(unweldEnabled and 1 or 0)
-            unweldCheck:SetEnabled(canEdit)
-            unweldCheck.OnChange = function(_, value)
-                if canEdit then
-                    unweldEnabled = value
-                    SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
-                end
-            end
-
-            local staticPropCheck = panel:CheckBox("Allow pickup of frozen map props")
-            staticPropCheck:SetValue(staticPropPickupEnabled and 1 or 0)
-            staticPropCheck:SetEnabled(canEdit)
-            staticPropCheck.OnChange = function(_, value)
-                if canEdit then
-                    staticPropPickupEnabled = value
                     SavePickupSettings(pickupEnabled, unweldEnabled, staticPropPickupEnabled, pickupBlacklist)
                 end
             end
