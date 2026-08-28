@@ -3,33 +3,48 @@ if CLIENT then return end
 local blacklistedModelFolders = {
     "models/props_junk/",
     "models/props_vehicles/",
+    "models/props_c17/", -- Added to cover most static/ragdoll furniture in standard maps
+}
+
+-- Add a keyword blacklist to catch specific physics ragdolls
+local blacklistedKeywords = {
+    "mattress",
+    "furniture"
 }
 
 local function IsBlacklistedModel(mdl)
     if not mdl then return false end
     mdl = string.lower(mdl)
+    
+    -- Check if model is in a blacklisted folder
     for _, prefix in ipairs(blacklistedModelFolders) do
         if string.StartWith(mdl, prefix) then
             return true
         end
     end
+    
+    -- Check if model name contains blacklisted keywords
+    for _, keyword in ipairs(blacklistedKeywords) do
+        if string.find(mdl, keyword) then
+            return true
+        end
+    end
+    
     return false
 end
 
 -- ⚙️ CONFIGURATION SUITE 
-local MIN_IMPACT_SPEED   = 550  -- Physics impact speed required for a basic corpse splash
-local BLEED_INTERVAL     = 0.5  -- Standard delay between blood drips (Higher = less blood frequency)
-local ALIVE_BLEED_CHANCE = 60   -- % chance a living NPC drips/stains on a tick (0-100)
-local CORPSE_BLEED_CHANCE= 40   -- % chance a dead ragdoll drips/stains on a tick (0-100)
-local LIMB_REDUCTION     = 0.3  -- Multiply bleed chance by this if shot in arm/leg (70% less blood)
+local MIN_IMPACT_SPEED   = 550  
+local BLEED_INTERVAL     = 0.5  
+local ALIVE_BLEED_CHANCE = 60   
+local CORPSE_BLEED_CHANCE= 40   
+local LIMB_REDUCTION     = 0.3  
 
--- 🦴 BONE SNAP CONFIGURATION
-local BONE_SNAP_SPEED    = 650  -- Speed threshold for a ragdoll collision to snap a limb
-local HIGH_POWER_DAMAGE  = 40   -- Damage threshold to snap a limb with a gun (e.g., Revolver/Magnum)
+local BONE_SNAP_SPEED    = 650  
+local HIGH_POWER_DAMAGE  = 40   
 
--- 💥 EXPLOSION SHRAPNEL CONFIGURATION
-local EXPLOSION_MIN_WOUNDS = 3  -- Minimum random puncture points on an explosion death ragdoll
-local EXPLOSION_MAX_WOUNDS = 6  -- Maximum random puncture points on an explosion death ragdoll
+local EXPLOSION_MIN_WOUNDS = 3  
+local EXPLOSION_MAX_WOUNDS = 6  
 
 local npcBloodTypes = {
     ["npc_headcrab"] = "YellowBlood",
@@ -40,6 +55,7 @@ local npcBloodTypes = {
     ["npc_antlionguard"] = "YellowBlood",
     ["npc_antlion_worker"] = "YellowBlood",
     ["npc_barnacle"] = "YellowBlood",
+    ["npc_hunter"] = "YellowBlood",
     
     ["npc_cscanner"] = "FadingScorch", 
     ["npc_clawscanner"] = "FadingScorch",
@@ -50,16 +66,48 @@ local npcBloodTypes = {
 }
 
 local function IsPlayerControlledRagdoll(ent)
-    if not IsValid(ent) or ent:IsPlayer() then return false end
-    if ent.IsRagMod or ent.RagMod or ent.RagmodRagdoll or ent.isRagmod or ent.is_ragmod then return true end
-    if ent:GetNWBool("RagMod", false) or ent:GetNWBool("IsRagMod", false) or ent:GetNWBool("is_ragmod", false) then return true end
+    if not IsValid(ent) then return false end
+    if ent:IsPlayer() then return true end
+
+    -- RagMod & RagMod Reworked Direct Table Keys
+    if ent.IsRagMod or ent.RagMod or ent.RagmodRagdoll or ent.isRagmod or ent.is_ragmod 
+        or ent.rm_ragdoll or ent.rm_owner or ent.rm_is_ragdoll or ent.RM_IsRagdoll 
+        or ent.RagMod_Owner or ent.RagModOwner or ent.RagMod_Ragdoll then 
+        return true 
+    end
+
+    -- Networked Flags
+    if ent:GetNWBool("RagMod", false) or ent:GetNWBool("IsRagMod", false) or ent:GetNWBool("is_ragmod", false) 
+        or ent:GetNWBool("rm_ragmod", false) or ent:GetNWBool("rm_is_ragmod", false) or ent:GetNWBool("RM_IsRagdoll", false) then 
+        return true 
+    end
+
+    -- Owner Entity Checks
     local owner = ent:GetOwner()
     if IsValid(owner) and owner:IsPlayer() then return true end
+
     local nwOwner = ent:GetNWEntity("RagdollOwner")
     if IsValid(nwOwner) and nwOwner:IsPlayer() then return true end
+
     local rmOwner = ent:GetNWEntity("rm_owner")
     if IsValid(rmOwner) and rmOwner:IsPlayer() then return true end
-    if IsValid(ent.RagdollOwner) or IsValid(ent.Player) then return true end
+
+    local rmOwner2 = ent:GetNWEntity("RagMod_Owner")
+    if IsValid(rmOwner2) and rmOwner2:IsPlayer() then return true end
+
+    local rmOwner3 = ent:GetNWEntity("RagModOwner")
+    if IsValid(rmOwner3) and rmOwner3:IsPlayer() then return true end
+
+    if IsValid(ent.RagdollOwner) and ent.RagdollOwner:IsPlayer() then return true end
+    if IsValid(ent.Player) and ent.Player:IsPlayer() then return true end
+
+    -- Active Player RagMod Object Check
+    for _, p in ipairs(player.GetAll()) do
+        if p.rm_ragdoll == ent or p.RagMod_Ragdoll == ent or p.RagModRagdoll == ent then
+            return true
+        end
+    end
+
     return false
 end
 
@@ -99,7 +147,7 @@ local function GetBloodDecal(ent)
 
     local mdl = string.lower(ent:GetModel() or "")
     if ent:GetClass() == "prop_ragdoll" then
-        if string.find(mdl, "antlion") or string.find(mdl, "headcrab") or string.find(mdl, "vortigaunt") or string.find(mdl, "barnacle") then
+        if string.find(mdl, "antlion") or string.find(mdl, "headcrab") or string.find(mdl, "vortigaunt") or string.find(mdl, "barnacle") or string.find(mdl, "hunter") then
             ent.BleedDecalType = "YellowBlood"
         elseif string.find(mdl, "scanner") or string.find(mdl, "manhack") or string.find(mdl, "rollermine") then
             ent.BleedDecalType = "FadingScorch"
@@ -125,8 +173,8 @@ end
 local function LoosenLimb(ent, physObj)
     if not IsValid(ent) or not IsValid(physObj) then return end
     physObj:SetDamping(0, 0.02)
-    physObj:AddAngleVelocity(VectorRand() * 400)
-    physObj:ApplyForceCenter(VectorRand() * 250)
+    physObj:AddAngleVelocity(VectorRand() * 800)
+    physObj:ApplyForceCenter(VectorRand() * 400)
 end
 
 hook.Add("ScaleNPCDamage", "BleedOutTrackHitgroups", function(npc, hitgroup, dmginfo)
@@ -136,7 +184,7 @@ hook.Add("ScaleNPCDamage", "BleedOutTrackHitgroups", function(npc, hitgroup, dmg
 end)
 
 local function TriggerArterialLeak(ent, duration, decalType, boneName, localPos, isLimb, customInterval)
-    if not IsValid(ent) then return end
+    if not IsValid(ent) or IsPlayerControlledRagdoll(ent) then return end
     if decalType == "None" or decalType == "Impact.Wood" or decalType == "Impact.Metal" then return end
 
     ent.LeakWounds = ent.LeakWounds or {}
@@ -150,7 +198,7 @@ local function TriggerArterialLeak(ent, duration, decalType, boneName, localPos,
     local activeInterval = customInterval or BLEED_INTERVAL
 
     timer.Create(timerName, activeInterval, 0, function()
-        if not IsValid(ent) then
+        if not IsValid(ent) or IsPlayerControlledRagdoll(ent) then
             timer.Remove(timerName)
             return
         end
@@ -225,6 +273,8 @@ end
 
 hook.Add("CreateEntityRagdoll", "TransferNPCBloodType", function(owner, ragdoll)
     if IsValid(owner) and IsValid(ragdoll) then
+        if IsPlayerControlledRagdoll(owner) or IsPlayerControlledRagdoll(ragdoll) then return end
+
         if owner.IsVJBaseSNPC then
             ragdoll.IsVJInherited = true
             ragdoll.BleedDecalType = "None"
@@ -294,8 +344,11 @@ end)
 hook.Add("OnEntityCreated", "RagdollImpactBleedSetup", function(ent)
     timer.Simple(0, function()
         if IsValid(ent) and ent:GetClass() == "prop_ragdoll" then
+            if IsPlayerControlledRagdoll(ent) then return end
+
             ent:AddCallback("PhysicsCollide", function(collider, colData)
-                
+                if IsPlayerControlledRagdoll(collider) then return end
+
                 if colData.Speed > BONE_SNAP_SPEED and colData.DeltaTime > 0.3 then
                     local hitPhys = colData.PhysicsObject
                     if IsValid(hitPhys) then
@@ -340,15 +393,11 @@ hook.Add("OnEntityCreated", "RagdollImpactBleedSetup", function(ent)
 end)
 
 hook.Add("EntityTakeDamage", "UnifiedShotBleed", function(target, dmginfo)
-    if not IsValid(target) then return end
+    if not IsValid(target) or IsPlayerControlledRagdoll(target) then return end
     
     local cls = target:GetClass()
-    
-    -- 🛑 REINFORCED PROP FILTER
-    -- Explicitly detects if the entity is any variation of a world prop object.
     local isProp = (cls == "prop_physics" or cls == "prop_physics_multiplayer" or cls == "simple_physics_prop" or cls == "prop_dynamic" or cls == "prop_physics_override")
 
-    -- Only allow calculations if it's a living NPC, a biological ragdoll corpse, or a structural physics prop
     if target:IsNPC() or cls == "prop_ragdoll" or isProp then
         
         if dmginfo:IsDamageType(DMG_GENERIC) and dmginfo:GetAttacker() == game.GetWorld() then return end
@@ -361,20 +410,17 @@ hook.Add("EntityTakeDamage", "UnifiedShotBleed", function(target, dmginfo)
         if forceDir:Length() < 0.1 then forceDir = VectorRand() end
         local attacker = dmginfo:GetAttacker()
 
-        -- Initial Surface Splatter: Handles generic impacts safely 
         local selfStart = hitPos - (forceDir * 15)
         local selfEnd = hitPos + (forceDir * 15)
         
-        -- If it is a prop, override default biological fallout and treat its impact cleanly
         if isProp then
             if decalType == "Blood" or decalType == "YellowBlood" then decalType = "None" end
             if decalType ~= "None" then
                 util.Decal(decalType, selfStart, selfEnd, IsValid(attacker) and attacker or nil)
             end
-            return -- ❌ Hard Exit: Absolute separation, preventing props from entering the blood leak timers below.
+            return 
         end
 
-        -- Double Check Safety Catch for biological flows
         if decalType == "None" or decalType == "Impact.Wood" or decalType == "Impact.Metal" then return end
 
         local damageAmount = dmginfo:GetDamage()
@@ -391,10 +437,8 @@ hook.Add("EntityTakeDamage", "UnifiedShotBleed", function(target, dmginfo)
                 local bonePos = target:GetBonePosition(headBone)
                 if bonePos then
                     if hitPos:DistToSqr(bonePos) < 225 then 
-                        -- Headshot: yellow blood (headcrab on the head)
                         decalType = "YellowBlood"
                     else
-                        -- Body shot: red blood (zombie flesh)
                         decalType = "Blood"
                     end
                 end
@@ -450,7 +494,11 @@ hook.Add("EntityTakeDamage", "UnifiedShotBleed", function(target, dmginfo)
         if target:IsNPC() then
             local maxHP = target:GetMaxHealth()
             local currentHP = target:Health() - damageAmount
-            if damageAmount >= 15 or (maxHP > 0 and (currentHP / maxHP) <= 0.6) then
+            
+            local bleedThreshold = 15
+            if cls == "npc_hunter" then bleedThreshold = 35 end
+            
+            if damageAmount >= bleedThreshold or (maxHP > 0 and (currentHP / maxHP) <= 0.6) then
                 shouldLeak = true
             end
         elseif cls == "prop_ragdoll" then
